@@ -1,0 +1,43 @@
+{% extends "exports/base.html" %}
+
+{% block content %}
+<h1>{{ timetable.branch.name }}</h1>
+<h2>{{ title }} ({{ teacher.employee_code }})</h2>
+<div class="header-info">
+    Session: {{ timetable.session.name }} | Shift: {{ timetable.shift.name }}
+    {% if timetable.season %} | Season: {{ timetable.season.name }}{% endif %}
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>Day</th>
+            {% for slot in period_slots %}
+            <th>
+                P{{ slot.period_number }}<br>
+                {{ slot.start_time|time:"H:i" }} - {{ slot.end_time|time:"H:i" }}
+            </th>
+            {% endfor %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for day in days %}
+        <tr>
+            <td class="day-cell">{{ day_names|get_item:day }}</td>
+            {% for slot in period_slots %}
+            <td class="subject-cell">
+                {% with data=grid|get_item:day|get_item:slot.period_number %}
+                {% if data %}
+                <div class="subject-name">{{ data.entry.subject.short_name|default:data.entry.subject.name }}</div>
+                <div class="teacher-name">{{ data.section }}</div>
+                {% else %}
+                -
+                {% endif %}
+                {% endwith %}
+            </td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

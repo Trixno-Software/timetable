@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <style>
+        @page {
+            size: A4 landscape;
+            margin: 1cm;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 10px;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 5px;
+            font-size: 18px;
+        }
+        h2 {
+            text-align: center;
+            color: #666;
+            margin-top: 5px;
+            font-size: 14px;
+        }
+        .header-info {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #666;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            border: 1px solid #ccc;
+            padding: 6px;
+            text-align: center;
+            vertical-align: middle;
+        }
+        th {
+            background-color: #4472C4;
+            color: white;
+            font-weight: bold;
+        }
+        .day-cell {
+            background-color: #D9E2F3;
+            font-weight: bold;
+            width: 80px;
+        }
+        .subject-cell {
+            font-size: 9px;
+        }
+        .subject-name {
+            font-weight: bold;
+        }
+        .teacher-name {
+            font-size: 8px;
+            color: #666;
+        }
+        .section-break {
+            page-break-before: always;
+        }
+        .footer {
+            margin-top: 20px;
+            text-align: center;
+            font-size: 8px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    {% block content %}{% endblock %}
+    <div class="footer">
+        Generated from Timetable Generator SaaS
+    </div>
+</body>
+</html>
