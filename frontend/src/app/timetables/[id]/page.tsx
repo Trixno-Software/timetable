@@ -636,12 +636,26 @@ export default function TimetableViewPage() {
                 <Select
                   placeholder="Select teacher"
                   showSearch
-                  optionFilterProp="label"
-                  options={teachers.map((teacher: any) => ({
-                    value: teacher.id,
-                    label: teacher.full_name || `${teacher.first_name || ''} ${teacher.last_name || ''}`.trim() || teacher.email || 'Unknown',
-                  }))}
-                />
+                  optionFilterProp="children"
+                >
+                  {/* Include current teacher if not in list */}
+                  {editingEntry?.teacher && !teachers.some((t: any) => t.id === editingEntry.teacher) && (
+                    <Select.Option key={editingEntry.teacher} value={editingEntry.teacher}>
+                      {editingEntry.teacher_name || 'Current Teacher'}
+                    </Select.Option>
+                  )}
+                  {teachers.map((teacher: any) => {
+                    const displayName = teacher.full_name ||
+                      `${teacher.first_name || ''} ${teacher.last_name || ''}`.trim() ||
+                      teacher.email ||
+                      'Unknown';
+                    return (
+                      <Select.Option key={teacher.id} value={teacher.id}>
+                        {displayName}
+                      </Select.Option>
+                    );
+                  })}
+                </Select>
               </Form.Item>
             </Form>
           </>

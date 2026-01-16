@@ -47,7 +47,7 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { AntdLayout } from '@/components/layout/AntdLayout';
-import { assignmentsApi, sectionsApi, subjectsApi, teachersApi, sessionsApi, branchesApi, gradesApi } from '@/lib/api';
+import { assignmentsApi, sectionsApi, subjectsApi, teachersApi, sessionsApi, branchesApi, gradesApi, authApi } from '@/lib/api';
 
 const { Text, Title } = Typography;
 
@@ -179,11 +179,26 @@ export default function AssignmentsPage() {
 
   // State for bulk creation mode
   const [bulkMode, setBulkMode] = useState(false);
+  const [drawerBranch, setDrawerBranch] = useState<string>('');
+
+  // Get current user info
+  const { data: userData } = useQuery({
+    queryKey: ['currentUser'],
+    queryFn: () => authApi.me(),
+  });
+
+  const currentUser = userData?.data;
+  const userBranch = currentUser?.branch;
+  const isSchoolAdmin = currentUser?.role === 'school_admin';
+  const isBranchAdmin = currentUser?.role === 'branch_admin' || currentUser?.role === 'coordinator';
 
   const openDrawer = (assignment?: Assignment) => {
     if (assignment) {
       setEditingAssignment(assignment);
       setBulkMode(false);
+      // Find the section to get its branch
+      const section = sections.find((s: any) => s.id === assignment.section);
+      setDrawerBranch(section?.branch || userBranch || '');
       form.setFieldsValue({
         section: assignment.section,
         subject: assignment.subject,
@@ -194,6 +209,9 @@ export default function AssignmentsPage() {
     } else {
       setEditingAssignment(null);
       setBulkMode(true);
+      // Auto-select branch for branch admin, empty for school admin
+      const branchToSet = isBranchAdmin && userBranch ? userBranch : '';
+      setDrawerBranch(branchToSet);
       form.resetFields();
       form.setFieldsValue({ weekly_periods: 5 });
     }
@@ -204,6 +222,7 @@ export default function AssignmentsPage() {
     setDrawerOpen(false);
     setEditingAssignment(null);
     setBulkMode(false);
+    setDrawerBranch('');
     form.resetFields();
   };
 
@@ -223,7 +242,13 @@ export default function AssignmentsPage() {
         // Single update for editing
         updateMutation.mutate({ id: editingAssignment.id, data: values });
       } else if (bulkMode) {
-        // Bulk creation
+        // Bulk creation - use current session for branch
+        if (!currentSessionForBranch) {
+          message.error('No session found for this branch. Please create a session first.');
+          return;
+        }
+
+        const sessionId = currentSessionForBranch.id;
         const sectionsToCreate = Array.isArray(values.sections) ? values.sections : [values.sections];
         const subjectsToCreate = Array.isArray(values.subjects) ? values.subjects : [values.subjects];
 
@@ -243,7 +268,7 @@ export default function AssignmentsPage() {
           for (const subjectId of subjectsToCreate) {
             // Check if assignment already exists
             const exists = assignments.some(
-              (a) => a.section === sectionId && a.subject === subjectId && a.session === values.session
+              (a) => a.section === sectionId && a.subject === subjectId && a.session === sessionId
             );
 
             if (exists) {
@@ -253,7 +278,7 @@ export default function AssignmentsPage() {
 
             try {
               const assignmentData: any = {
-                session: values.session,
+                session: sessionId,
                 section: sectionId,
                 subject: subjectId,
                 weekly_periods: values.weekly_periods,
@@ -366,6 +391,44 @@ export default function AssignmentsPage() {
     gridBranch ? teachers.filter((t: any) => t.branch === gridBranch) : teachers,
     [gridBranch, teachers]
   );
+
+  // Filtered data for drawer based on drawerBranch
+  // Note: sections have branch_id (from grade.branch_id), not branch
+  const drawerFilteredSections = useMemo(() =>
+    drawerBranch ? sections.filter((s: any) => s.branch_id === drawerBranch || s.branch === drawerBranch) : [],
+    [drawerBranch, sections]
+  );
+
+  const drawerFilteredSubjects = useMemo(() =>
+    drawerBranch ? subjects.filter((s: any) => s.branch === drawerBranch) : [],
+    [drawerBranch, subjects]
+  );
+
+  const drawerFilteredTeachers = useMemo(() =>
+    drawerBranch ? teachers.filter((t: any) => t.branch === drawerBranch) : [],
+    [drawerBranch, teachers]
+  );
+
+  // Get current session for the selected branch (for drawer)
+  const currentSessionForBranch = useMemo(() => {
+    if (!drawerBranch) return null;
+    const branchSessions = sessions.filter((s: any) => s.branch === drawerBranch);
+    return branchSessions.find((s: any) => s.is_current) || branchSessions[0] || null;
+  }, [drawerBranch, sessions]);
+
+  // Get current session for grid view branch
+  const currentSessionForGrid = useMemo(() => {
+    if (!gridBranch) return null;
+    const branchSessions = sessions.filter((s: any) => s.branch === gridBranch);
+    return branchSessions.find((s: any) => s.is_current) || branchSessions[0] || null;
+  }, [gridBranch, sessions]);
+
+  // Auto-set gridSession when gridBranch changes
+  useEffect(() => {
+    if (currentSessionForGrid && !gridSession) {
+      setGridSession(currentSessionForGrid.id);
+    }
+  }, [currentSessionForGrid, gridSession]);
 
   // Build grid data when section and session are selected
   useEffect(() => {
@@ -579,15 +642,13 @@ export default function AssignmentsPage() {
           value={record.teacher_id || undefined}
           onChange={(value) => handleGridChange(record.subject_id, 'teacher_id', value)}
           showSearch
-          optionFilterProp="children"
+          optionFilterProp="label"
           allowClear
-        >
-          {filteredTeachers.map((teacher: any) => (
-            <Select.Option key={teacher.id} value={teacher.id}>
-              {teacher.first_name} {teacher.last_name}
-            </Select.Option>
-          ))}
-        </Select>
+          options={filteredTeachers.map((teacher: any) => ({
+            value: teacher.id,
+            label: teacher.full_name || `${teacher.first_name} ${teacher.last_name}`.trim(),
+          }))}
+        />
       ),
     },
     {
@@ -634,7 +695,10 @@ export default function AssignmentsPage() {
               value={gridBranch || undefined}
               onChange={(value) => {
                 setGridBranch(value);
-                setGridSession('');
+                // Auto-select current session for the new branch
+                const branchSessions = sessions.filter((s: any) => s.branch === value);
+                const currentSession = branchSessions.find((s: any) => s.is_current) || branchSessions[0];
+                setGridSession(currentSession?.id || '');
                 setGridGrade('');
                 setGridSection('');
               }}
@@ -650,21 +714,11 @@ export default function AssignmentsPage() {
           </Col>
           <Col span={5}>
             <Text strong style={{ display: 'block', marginBottom: 4 }}>Session</Text>
-            <Select
-              style={{ width: '100%' }}
-              placeholder="Select session"
-              value={gridSession || undefined}
-              onChange={setGridSession}
-              disabled={!gridBranch}
-              showSearch
-              optionFilterProp="children"
-            >
-              {filteredSessions.map((session: any) => (
-                <Select.Option key={session.id} value={session.id}>
-                  {session.name}
-                </Select.Option>
-              ))}
-            </Select>
+            <Input
+              value={currentSessionForGrid?.name || (gridBranch ? 'No session' : 'Select branch')}
+              disabled
+              style={{ background: '#f5f5f5' }}
+            />
           </Col>
           <Col span={5}>
             <Text strong style={{ display: 'block', marginBottom: 4 }}>Grade</Text>
@@ -921,19 +975,75 @@ export default function AssignmentsPage() {
             />
           )}
 
-          <Form.Item
-            name="session"
-            label="Session"
-            rules={[{ required: true, message: 'Please select a session' }]}
-          >
-            <Select placeholder="Select session" showSearch optionFilterProp="children">
-              {sessions.map((session: any) => (
-                <Select.Option key={session.id} value={session.id}>
-                  {session.name}
-                </Select.Option>
-              ))}
-            </Select>
-          </Form.Item>
+          {/* Branch selection - only for school admin in bulk mode */}
+          {!editingAssignment && (
+            <Form.Item
+              label="Branch"
+              required
+            >
+              {isBranchAdmin && userBranch ? (
+                <Input
+                  value={branches.find((b: any) => b.id === userBranch)?.name || 'Your Branch'}
+                  disabled
+                  style={{ background: '#f5f5f5' }}
+                />
+              ) : (
+                <Select
+                  placeholder="Select branch first"
+                  value={drawerBranch || undefined}
+                  onChange={(value) => {
+                    setDrawerBranch(value);
+                    // Clear dependent fields when branch changes
+                    form.setFieldsValue({
+                      session: undefined,
+                      sections: undefined,
+                      subjects: undefined,
+                      teacher: undefined,
+                    });
+                  }}
+                  showSearch
+                  optionFilterProp="children"
+                >
+                  {branches.map((branch: any) => (
+                    <Select.Option key={branch.id} value={branch.id}>
+                      {branch.name}
+                    </Select.Option>
+                  ))}
+                </Select>
+              )}
+            </Form.Item>
+          )}
+
+          {editingAssignment ? (
+            <Form.Item
+              name="session"
+              label="Session"
+              rules={[{ required: true, message: 'Please select a session' }]}
+            >
+              <Select
+                placeholder="Select session"
+                showSearch
+                optionFilterProp="children"
+              >
+                {sessions.map((session: any) => (
+                  <Select.Option key={session.id} value={session.id}>
+                    {session.name}
+                  </Select.Option>
+                ))}
+              </Select>
+            </Form.Item>
+          ) : (
+            <Form.Item label="Session">
+              <Input
+                value={currentSessionForBranch?.name || (drawerBranch ? 'No session found' : 'Select branch first')}
+                disabled
+                style={{ background: '#f5f5f5' }}
+              />
+              {currentSessionForBranch?.is_current && (
+                <Text type="secondary" style={{ fontSize: 12 }}>Current session (auto-selected)</Text>
+              )}
+            </Form.Item>
+          )}
 
           {editingAssignment ? (
             // Single select for editing
@@ -967,7 +1077,7 @@ export default function AssignmentsPage() {
               </Form.Item>
             </>
           ) : (
-            // Multi-select for bulk creation
+            // Multi-select for bulk creation - filtered by branch
             <>
               <Form.Item
                 name="sections"
@@ -977,13 +1087,14 @@ export default function AssignmentsPage() {
               >
                 <Select
                   mode="multiple"
-                  placeholder="Select sections (can select multiple)"
+                  placeholder={drawerBranch ? "Select sections (can select multiple)" : "Select branch first"}
                   showSearch
                   optionFilterProp="children"
                   maxTagCount={3}
                   maxTagPlaceholder={(omittedValues) => `+${omittedValues.length} more`}
+                  disabled={!drawerBranch}
                 >
-                  {sections.map((section: any) => (
+                  {drawerFilteredSections.map((section: any) => (
                     <Select.Option key={section.id} value={section.id}>
                       {section.name} ({section.grade_name})
                     </Select.Option>
@@ -999,13 +1110,14 @@ export default function AssignmentsPage() {
               >
                 <Select
                   mode="multiple"
-                  placeholder="Select subjects (can select multiple)"
+                  placeholder={drawerBranch ? "Select subjects (can select multiple)" : "Select branch first"}
                   showSearch
                   optionFilterProp="children"
                   maxTagCount={3}
                   maxTagPlaceholder={(omittedValues) => `+${omittedValues.length} more`}
+                  disabled={!drawerBranch}
                 >
-                  {subjects.map((subject: any) => (
+                  {drawerFilteredSubjects.map((subject: any) => (
                     <Select.Option key={subject.id} value={subject.id}>
                       {subject.name}
                     </Select.Option>
@@ -1021,14 +1133,15 @@ export default function AssignmentsPage() {
             tooltip="Optional - Leave empty to create placeholder teacher (e.g., MATH_TEACHER_1)"
           >
             <Select
-              placeholder="Select teacher (optional)"
+              placeholder={editingAssignment || drawerBranch ? "Select teacher (optional)" : "Select branch first"}
               showSearch
               optionFilterProp="children"
               allowClear
+              disabled={!drawerBranch && !editingAssignment}
             >
-              {teachers.map((teacher: any) => (
+              {(editingAssignment ? teachers : drawerFilteredTeachers).map((teacher: any) => (
                 <Select.Option key={teacher.id} value={teacher.id}>
-                  {teacher.first_name} {teacher.last_name}
+                  {teacher.full_name || `${teacher.first_name} ${teacher.last_name}`}
                 </Select.Option>
               ))}
             </Select>
