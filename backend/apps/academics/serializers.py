@@ -60,6 +60,10 @@ class TeacherListSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source="branch.name", read_only=True)
     full_name = serializers.CharField(read_only=True)
     subject_names = serializers.SerializerMethodField()
+    has_left = serializers.BooleanField(read_only=True)
+    needs_replacement = serializers.BooleanField(read_only=True)
+    assignment_count = serializers.SerializerMethodField()
+    replaced_by_name = serializers.CharField(source="replaced_by.full_name", read_only=True)
 
     class Meta:
         model = Teacher
@@ -68,12 +72,17 @@ class TeacherListSerializer(serializers.ModelSerializer):
             "first_name", "last_name", "full_name", "email", "phone",
             "subjects", "subject_names", "max_periods_per_day",
             "max_periods_per_week", "is_class_teacher",
-            "is_active", "created_at", "updated_at",
+            "status", "departure_date", "departure_reason",
+            "replaced_by", "replaced_by_name", "has_left", "needs_replacement",
+            "assignment_count", "is_active", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def get_subject_names(self, obj):
         return [s.name for s in obj.subjects.all()]
+
+    def get_assignment_count(self, obj):
+        return obj.assignments.filter(is_active=True).count()
 
 
 class TeacherDetailSerializer(serializers.ModelSerializer):
@@ -110,7 +119,8 @@ class TeacherCreateUpdateSerializer(serializers.ModelSerializer):
             "id", "branch", "user", "employee_code",
             "first_name", "last_name", "email", "phone",
             "subject_ids", "max_periods_per_day", "max_periods_per_week",
-            "is_class_teacher", "class_teacher_section", "is_active",
+            "is_class_teacher", "class_teacher_section",
+            "status", "departure_date", "departure_reason", "is_active",
         ]
         read_only_fields = ["id"]
 
@@ -129,6 +139,44 @@ class TeacherCreateUpdateSerializer(serializers.ModelSerializer):
         if subject_ids is not None:
             instance.subjects.set(Subject.objects.filter(id__in=subject_ids))
         return instance
+
+
+class TeacherReplacementSerializer(serializers.Serializer):
+    """Serializer for replacing a departed teacher with a new one"""
+    departing_teacher_id = serializers.UUIDField()
+    replacement_teacher_id = serializers.UUIDField()
+    transfer_assignments = serializers.BooleanField(default=True)
+    transfer_timetable_entries = serializers.BooleanField(default=True)
+    departure_date = serializers.DateField(required=False)
+    departure_reason = serializers.CharField(required=False, allow_blank=True)
+    status = serializers.ChoiceField(
+        choices=[("resigned", "Resigned"), ("terminated", "Terminated")],
+        default="resigned"
+    )
+
+    def validate(self, data):
+        departing_teacher_id = data.get("departing_teacher_id")
+        replacement_teacher_id = data.get("replacement_teacher_id")
+
+        try:
+            departing_teacher = Teacher.objects.get(id=departing_teacher_id)
+            data["departing_teacher"] = departing_teacher
+        except Teacher.DoesNotExist:
+            raise serializers.ValidationError({"departing_teacher_id": "Teacher not found"})
+
+        try:
+            replacement_teacher = Teacher.objects.get(id=replacement_teacher_id)
+            data["replacement_teacher"] = replacement_teacher
+        except Teacher.DoesNotExist:
+            raise serializers.ValidationError({"replacement_teacher_id": "Replacement teacher not found"})
+
+        if departing_teacher_id == replacement_teacher_id:
+            raise serializers.ValidationError("Departing and replacement teachers must be different")
+
+        if departing_teacher.branch != replacement_teacher.branch:
+            raise serializers.ValidationError("Both teachers must be from the same branch")
+
+        return data
 
 
 class TeacherAvailabilitySerializer(serializers.ModelSerializer):
@@ -209,7 +257,7 @@ class PeriodTemplateCreateSerializer(serializers.ModelSerializer):
 class AssignmentSerializer(serializers.ModelSerializer):
     section_name = serializers.SerializerMethodField()
     subject_name = serializers.CharField(source="subject.name", read_only=True)
-    teacher_name = serializers.CharField(source="teacher.full_name", read_only=True)
+    teacher_name = serializers.SerializerMethodField()
     session_name = serializers.CharField(source="session.name", read_only=True)
     grade_name = serializers.CharField(source="section.grade.name", read_only=True)
 
@@ -222,9 +270,49 @@ class AssignmentSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+        extra_kwargs = {
+            "teacher": {"required": False, "allow_null": True},
+        }
 
     def get_section_name(self, obj):
         return f"{obj.section.grade.name} - {obj.section.name}"
+
+    def get_teacher_name(self, obj):
+        if obj.teacher:
+            return obj.teacher.full_name
+        return "TBA (To Be Assigned)"
+
+    def create(self, validated_data):
+        # If no teacher provided, create a placeholder teacher
+        if not validated_data.get("teacher"):
+            section = validated_data.get("section")
+            subject = validated_data.get("subject")
+            branch = section.grade.branch
+
+            # Generate placeholder teacher code like "MATH_TEACHER_1"
+            subject_code = subject.code.upper() if subject.code else subject.name[:4].upper()
+            base_code = f"{subject_code}_TEACHER"
+
+            # Find next available number
+            existing_count = Teacher.objects.filter(
+                branch=branch,
+                employee_code__startswith=base_code
+            ).count()
+            placeholder_code = f"{base_code}_{existing_count + 1}"
+
+            # Create placeholder teacher
+            placeholder_teacher = Teacher.objects.create(
+                branch=branch,
+                employee_code=placeholder_code,
+                first_name=f"{subject.name}",
+                last_name=f"Teacher {existing_count + 1}",
+                is_active=True
+            )
+            # Link placeholder teacher to the subject
+            placeholder_teacher.subjects.add(subject)
+            validated_data["teacher"] = placeholder_teacher
+
+        return super().create(validated_data)
 
 
 class RoomSerializer(serializers.ModelSerializer):

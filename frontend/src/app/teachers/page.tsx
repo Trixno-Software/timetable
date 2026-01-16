@@ -39,6 +39,10 @@ import {
   UserOutlined,
   MailOutlined,
   PhoneOutlined,
+  SwapOutlined,
+  ExclamationCircleOutlined,
+  LogoutOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { AntdLayout } from '@/components/layout/AntdLayout';
@@ -58,18 +62,31 @@ interface Teacher {
   phone: string;
   subjects: string[];
   subject_names: string[];
+  status: 'active' | 'on_leave' | 'resigned' | 'terminated';
+  departure_date?: string;
+  departure_reason?: string;
+  replaced_by?: string;
+  replaced_by_name?: string;
+  has_left: boolean;
+  needs_replacement: boolean;
+  assignment_count: number;
   is_active: boolean;
   created_at: string;
 }
 
 export default function TeachersPage() {
   const [form] = Form.useForm();
+  const [departureForm] = Form.useForm();
+  const [replacementForm] = Form.useForm();
   const queryClient = useQueryClient();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const [importModalOpen, setImportModalOpen] = useState(false);
+  const [departureModalOpen, setDepartureModalOpen] = useState(false);
+  const [replacementModalOpen, setReplacementModalOpen] = useState(false);
   const [editingTeacher, setEditingTeacher] = useState<Teacher | null>(null);
   const [selectedTeacher, setSelectedTeacher] = useState<Teacher | null>(null);
+  const [departingTeacher, setDepartingTeacher] = useState<Teacher | null>(null);
   const [searchText, setSearchText] = useState('');
   const [importBranch, setImportBranch] = useState('');
   const [importFile, setImportFile] = useState<any>(null);
@@ -140,6 +157,43 @@ export default function TeachersPage() {
     },
     onError: (error: any) => {
       message.error(error.response?.data?.error || 'Import failed');
+    },
+  });
+
+  const markDepartedMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: any }) =>
+      teachersApi.markDeparted(id, data),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: ['teachers'] });
+      const result = response.data;
+      message.success(`Teacher marked as departed`);
+      if (result.active_assignments_needing_replacement > 0) {
+        message.warning(`${result.active_assignments_needing_replacement} assignments need replacement`);
+      }
+      setDepartureModalOpen(false);
+      setDepartingTeacher(null);
+      departureForm.resetFields();
+    },
+    onError: (error: any) => {
+      message.error(error.response?.data?.error || 'Failed to mark teacher as departed');
+    },
+  });
+
+  const replacementMutation = useMutation({
+    mutationFn: (data: any) => teachersApi.replace(data),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: ['teachers'] });
+      queryClient.invalidateQueries({ queryKey: ['assignments'] });
+      const result = response.data.results;
+      message.success(
+        `Replacement complete: ${result.assignments_transferred} assignments, ${result.timetable_entries_transferred} timetable entries transferred`
+      );
+      setReplacementModalOpen(false);
+      setDepartingTeacher(null);
+      replacementForm.resetFields();
+    },
+    onError: (error: any) => {
+      message.error(error.response?.data?.error || 'Failed to replace teacher');
     },
   });
 
@@ -218,13 +272,61 @@ export default function TeachersPage() {
     importMutation.mutate({ file: importFile, branchId: importBranch });
   };
 
+  const openDepartureModal = (teacher: Teacher) => {
+    setDepartingTeacher(teacher);
+    departureForm.setFieldsValue({
+      status: 'resigned',
+      departure_date: new Date().toISOString().split('T')[0],
+    });
+    setDepartureModalOpen(true);
+  };
+
+  const handleMarkDeparted = async () => {
+    if (!departingTeacher) return;
+    try {
+      const values = await departureForm.validateFields();
+      markDepartedMutation.mutate({ id: departingTeacher.id, data: values });
+    } catch (error) {
+      console.error('Validation failed:', error);
+    }
+  };
+
+  const openReplacementModal = (teacher: Teacher) => {
+    setDepartingTeacher(teacher);
+    replacementForm.resetFields();
+    setReplacementModalOpen(true);
+  };
+
+  const handleReplacement = async () => {
+    if (!departingTeacher) return;
+    try {
+      const values = await replacementForm.validateFields();
+      replacementMutation.mutate({
+        departing_teacher_id: departingTeacher.id,
+        replacement_teacher_id: values.replacement_teacher_id,
+        transfer_assignments: values.transfer_assignments ?? true,
+        transfer_timetable_entries: values.transfer_timetable_entries ?? true,
+        status: departingTeacher.status === 'active' ? 'resigned' : departingTeacher.status,
+      });
+    } catch (error) {
+      console.error('Validation failed:', error);
+    }
+  };
+
+  // Filter active teachers for replacement dropdown (exclude departing teacher)
+  const availableReplacements = teachers.filter(
+    (t) => t.status === 'active' && t.id !== departingTeacher?.id && t.branch === departingTeacher?.branch
+  );
+
   const filteredTeachers = teachers.filter((teacher) =>
     teacher.full_name?.toLowerCase().includes(searchText.toLowerCase()) ||
     teacher.employee_code?.toLowerCase().includes(searchText.toLowerCase()) ||
     teacher.email?.toLowerCase().includes(searchText.toLowerCase())
   );
 
-  const activeTeachers = teachers.filter((t) => t.is_active).length;
+  const activeTeachers = teachers.filter((t) => t.status === 'active').length;
+  const departedTeachers = teachers.filter((t) => t.has_left).length;
+  const needsReplacement = teachers.filter((t) => t.needs_replacement).length;
 
   const columns: ColumnsType<Teacher> = [
     {
@@ -289,18 +391,61 @@ export default function TeachersPage() {
     },
     {
       title: 'Status',
-      dataIndex: 'is_active',
-      key: 'is_active',
-      render: (isActive) => (
-        <Tag color={isActive ? 'success' : 'error'}>
-          {isActive ? 'Active' : 'Inactive'}
+      key: 'status',
+      render: (_, record) => {
+        const statusColors: Record<string, string> = {
+          active: 'success',
+          on_leave: 'warning',
+          resigned: 'default',
+          terminated: 'error',
+        };
+        const statusLabels: Record<string, string> = {
+          active: 'Active',
+          on_leave: 'On Leave',
+          resigned: 'Resigned',
+          terminated: 'Terminated',
+        };
+        return (
+          <Space direction="vertical" size={0}>
+            <Tag color={statusColors[record.status] || 'default'}>
+              {statusLabels[record.status] || record.status}
+            </Tag>
+            {record.needs_replacement && (
+              <Tag color="error" icon={<WarningOutlined />} style={{ marginTop: 4 }}>
+                Needs Replacement
+              </Tag>
+            )}
+            {record.replaced_by_name && (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                Replaced by: {record.replaced_by_name}
+              </Text>
+            )}
+          </Space>
+        );
+      },
+      filters: [
+        { text: 'Active', value: 'active' },
+        { text: 'On Leave', value: 'on_leave' },
+        { text: 'Resigned', value: 'resigned' },
+        { text: 'Terminated', value: 'terminated' },
+      ],
+      onFilter: (value, record) => record.status === value,
+    },
+    {
+      title: 'Assignments',
+      key: 'assignments',
+      align: 'center',
+      width: 100,
+      render: (_, record) => (
+        <Tag color={record.assignment_count > 0 ? 'blue' : 'default'}>
+          {record.assignment_count || 0}
         </Tag>
       ),
     },
     {
       title: 'Actions',
       key: 'actions',
-      width: 150,
+      width: 180,
       render: (_, record) => (
         <Space>
           <Tooltip title="View Details">
@@ -309,6 +454,26 @@ export default function TeachersPage() {
           <Tooltip title="Edit">
             <Button type="text" icon={<EditOutlined />} onClick={() => openDrawer(record)} />
           </Tooltip>
+          {record.status === 'active' && (
+            <Tooltip title="Mark as Departed">
+              <Button
+                type="text"
+                icon={<LogoutOutlined />}
+                onClick={() => openDepartureModal(record)}
+                style={{ color: '#faad14' }}
+              />
+            </Tooltip>
+          )}
+          {record.needs_replacement && (
+            <Tooltip title="Assign Replacement">
+              <Button
+                type="text"
+                icon={<SwapOutlined />}
+                onClick={() => openReplacementModal(record)}
+                style={{ color: '#1677ff' }}
+              />
+            </Tooltip>
+          )}
           <Popconfirm
             title="Delete Teacher"
             description="Are you sure you want to delete this teacher?"
@@ -343,19 +508,29 @@ export default function TeachersPage() {
     >
       {/* Statistics */}
       <Row gutter={16} style={{ marginBottom: 24 }}>
-        <Col xs={8}>
+        <Col xs={6}>
           <Card>
             <Statistic title="Total Teachers" value={teachers.length} prefix={<TeamOutlined />} />
           </Card>
         </Col>
-        <Col xs={8}>
+        <Col xs={6}>
           <Card>
             <Statistic title="Active" value={activeTeachers} valueStyle={{ color: '#52c41a' }} />
           </Card>
         </Col>
-        <Col xs={8}>
+        <Col xs={6}>
           <Card>
-            <Statistic title="Inactive" value={teachers.length - activeTeachers} valueStyle={{ color: '#ff4d4f' }} />
+            <Statistic title="Departed" value={departedTeachers} valueStyle={{ color: '#8c8c8c' }} />
+          </Card>
+        </Col>
+        <Col xs={6}>
+          <Card>
+            <Statistic
+              title="Needs Replacement"
+              value={needsReplacement}
+              valueStyle={{ color: needsReplacement > 0 ? '#ff4d4f' : '#52c41a' }}
+              prefix={needsReplacement > 0 ? <WarningOutlined /> : null}
+            />
           </Card>
         </Col>
       </Row>
@@ -626,6 +801,181 @@ export default function TeachersPage() {
             Required columns: employee_code, first_name, last_name. Optional: email, phone, subjects
           </Text>
         </Space>
+      </Modal>
+
+      {/* Mark Departure Modal */}
+      <Modal
+        title={
+          <Space>
+            <ExclamationCircleOutlined style={{ color: '#faad14' }} />
+            Mark Teacher as Departed
+          </Space>
+        }
+        open={departureModalOpen}
+        onCancel={() => {
+          setDepartureModalOpen(false);
+          setDepartingTeacher(null);
+          departureForm.resetFields();
+        }}
+        onOk={handleMarkDeparted}
+        okText="Mark as Departed"
+        okButtonProps={{
+          loading: markDepartedMutation.isPending,
+          danger: true,
+        }}
+      >
+        {departingTeacher && (
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <div style={{ padding: 16, background: '#fff7e6', borderRadius: 8, border: '1px solid #ffd591' }}>
+              <Space>
+                <Avatar style={{ backgroundColor: '#1677ff' }}>
+                  {departingTeacher.first_name?.charAt(0)?.toUpperCase() || 'T'}
+                </Avatar>
+                <div>
+                  <Text strong>{departingTeacher.full_name}</Text>
+                  <br />
+                  <Text type="secondary">{departingTeacher.employee_code}</Text>
+                </div>
+              </Space>
+              {departingTeacher.assignment_count > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <Tag color="warning" icon={<WarningOutlined />}>
+                    {departingTeacher.assignment_count} active assignments will need replacement
+                  </Tag>
+                </div>
+              )}
+            </div>
+
+            <Form form={departureForm} layout="vertical">
+              <Form.Item
+                name="status"
+                label="Departure Type"
+                rules={[{ required: true }]}
+              >
+                <Select>
+                  <Select.Option value="resigned">Resigned</Select.Option>
+                  <Select.Option value="terminated">Terminated</Select.Option>
+                </Select>
+              </Form.Item>
+
+              <Form.Item name="departure_date" label="Departure Date">
+                <Input type="date" />
+              </Form.Item>
+
+              <Form.Item name="departure_reason" label="Reason (Optional)">
+                <Input.TextArea rows={3} placeholder="Enter reason for departure..." />
+              </Form.Item>
+            </Form>
+          </Space>
+        )}
+      </Modal>
+
+      {/* Teacher Replacement Modal */}
+      <Modal
+        title={
+          <Space>
+            <SwapOutlined style={{ color: '#1677ff' }} />
+            Assign Replacement Teacher
+          </Space>
+        }
+        open={replacementModalOpen}
+        onCancel={() => {
+          setReplacementModalOpen(false);
+          setDepartingTeacher(null);
+          replacementForm.resetFields();
+        }}
+        onOk={handleReplacement}
+        okText="Replace Teacher"
+        okButtonProps={{
+          loading: replacementMutation.isPending,
+          type: 'primary',
+        }}
+        width={600}
+      >
+        {departingTeacher && (
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <div style={{ padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>Departing Teacher</Text>
+              <Space>
+                <Avatar style={{ backgroundColor: '#8c8c8c' }}>
+                  {departingTeacher.first_name?.charAt(0)?.toUpperCase() || 'T'}
+                </Avatar>
+                <div>
+                  <Text>{departingTeacher.full_name}</Text>
+                  <br />
+                  <Text type="secondary">{departingTeacher.employee_code}</Text>
+                </div>
+              </Space>
+              <div style={{ marginTop: 12 }}>
+                <Space wrap>
+                  <Tag color="blue">{departingTeacher.assignment_count} assignments</Tag>
+                  {departingTeacher.subject_names?.map((s, i) => (
+                    <Tag key={i}>{s}</Tag>
+                  ))}
+                </Space>
+              </div>
+            </div>
+
+            <Form form={replacementForm} layout="vertical">
+              <Form.Item
+                name="replacement_teacher_id"
+                label="Replacement Teacher"
+                rules={[{ required: true, message: 'Please select a replacement teacher' }]}
+              >
+                <Select
+                  placeholder="Select replacement teacher"
+                  showSearch
+                  optionFilterProp="children"
+                >
+                  {availableReplacements.map((teacher) => (
+                    <Select.Option key={teacher.id} value={teacher.id}>
+                      <Space>
+                        <Avatar size="small" style={{ backgroundColor: '#1677ff' }}>
+                          {teacher.first_name?.charAt(0)}
+                        </Avatar>
+                        {teacher.full_name} ({teacher.employee_code})
+                      </Space>
+                    </Select.Option>
+                  ))}
+                </Select>
+              </Form.Item>
+
+              <Form.Item
+                name="transfer_assignments"
+                valuePropName="checked"
+                initialValue={true}
+              >
+                <Space>
+                  <Input type="checkbox" defaultChecked />
+                  <Text>Transfer all assignments to replacement teacher</Text>
+                </Space>
+              </Form.Item>
+
+              <Form.Item
+                name="transfer_timetable_entries"
+                valuePropName="checked"
+                initialValue={true}
+              >
+                <Space>
+                  <Input type="checkbox" defaultChecked />
+                  <Text>Transfer all timetable entries to replacement teacher</Text>
+                </Space>
+              </Form.Item>
+            </Form>
+
+            <div style={{ padding: 12, background: '#e6f4ff', borderRadius: 8, border: '1px solid #91caff' }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                <strong>What happens:</strong>
+                <ul style={{ margin: '8px 0 0 0', paddingLeft: 20 }}>
+                  <li>All active assignments will be transferred to the replacement teacher</li>
+                  <li>All timetable entries will be updated with the new teacher</li>
+                  <li>The departing teacher will be marked as inactive</li>
+                  <li>Subjects from the departing teacher will be added to the replacement</li>
+                </ul>
+              </Text>
+            </div>
+          </Space>
+        )}
       </Modal>
     </AntdLayout>
   );

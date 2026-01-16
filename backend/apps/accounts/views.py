@@ -12,12 +12,66 @@ from .permissions import CanManageUsers, IsSuperAdmin
 from .serializers import (
     LoginSerializer,
     PasswordChangeSerializer,
+    SchoolRegistrationSerializer,
     TokenResponseSerializer,
     UserActivitySerializer,
     UserCreateSerializer,
     UserSerializer,
     UserUpdateSerializer,
 )
+
+
+class RegisterSchoolView(APIView):
+    """
+    Public endpoint for school self-registration.
+    Creates a school, default branch, and admin user.
+    """
+    permission_classes = [AllowAny]
+    serializer_class = SchoolRegistrationSerializer
+
+    def post(self, request):
+        serializer = SchoolRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = serializer.save()
+        user = result["user"]
+
+        # Generate tokens
+        refresh = RefreshToken.for_user(user)
+
+        # Log activity
+        UserActivity.objects.create(
+            user=user,
+            action="school_registration",
+            ip_address=self.get_client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            details={
+                "school_id": str(result["school"].id),
+                "school_name": result["school"].name,
+            },
+        )
+
+        return Response({
+            "message": "School registered successfully",
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": UserSerializer(user).data,
+            "school": {
+                "id": str(result["school"].id),
+                "name": result["school"].name,
+                "code": result["school"].code,
+            },
+            "branch": {
+                "id": str(result["branch"].id),
+                "name": result["branch"].name,
+            },
+        }, status=status.HTTP_201_CREATED)
+
+    def get_client_ip(self, request):
+        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+        if x_forwarded_for:
+            return x_forwarded_for.split(",")[0]
+        return request.META.get("REMOTE_ADDR")
 
 
 class LoginView(APIView):

@@ -98,6 +98,16 @@ export default function LoginPage() {
           </div>
         </div>
 
+        {/* Register Link */}
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            New school?{' '}
+            <Link href="/register" style={{ color: '#764ba2', fontWeight: 600 }}>
+              Register your school
+            </Link>
+          </Text>
+        </div>
+
         {/* Login Form */}
         <Form
           form={form}

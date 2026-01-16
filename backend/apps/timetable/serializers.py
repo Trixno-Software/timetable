@@ -114,41 +114,91 @@ class TimetableEntryCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ["id"]
 
     def validate(self, data):
-        from .engine import ConflictDetector
+        """
+        Optimized conflict detection - only check relevant entries instead of all entries.
+        For updates: only validate if teacher, section, day, or period is changing.
+        """
+        # For partial updates, check if critical fields are changing
+        if self.instance:
+            teacher = data.get("teacher", self.instance.teacher)
+            section = data.get("section", self.instance.section)
+            day_of_week = data.get("day_of_week", self.instance.day_of_week)
+            period_slot = data.get("period_slot", self.instance.period_slot)
 
-        detector = ConflictDetector()
-        timetable = data.get("timetable") or self.instance.timetable if self.instance else None
-
-        if timetable:
-            # Load existing entries
-            existing_entries = TimetableEntry.objects.filter(
-                timetable=timetable
-            ).exclude(id=self.instance.id if self.instance else None)
-
-            for entry in existing_entries:
-                detector.assign(
-                    teacher_id=str(entry.teacher_id),
-                    section_id=str(entry.section_id),
-                    subject_id=str(entry.subject_id),
-                    day=entry.day_of_week,
-                    period=entry.period_slot.period_number,
-                    room_id=str(entry.room_id) if entry.room else None,
-                )
-
-            # Check new assignment
-            can_assign, conflicts = detector.can_assign(
-                teacher_id=str(data["teacher"].id),
-                section_id=str(data["section"].id),
-                day=data["day_of_week"],
-                period=data["period_slot"].period_number,
-                room_id=str(data["room"].id) if data.get("room") else None,
+            # If only subject is changing, no conflict check needed
+            critical_fields_changed = (
+                data.get("teacher") and data["teacher"] != self.instance.teacher or
+                data.get("section") and data["section"] != self.instance.section or
+                data.get("day_of_week") is not None and data["day_of_week"] != self.instance.day_of_week or
+                data.get("period_slot") and data["period_slot"] != self.instance.period_slot
             )
 
-            if not can_assign:
+            if not critical_fields_changed:
+                # Only subject/room changing - no conflict possible
+                return data
+        else:
+            teacher = data.get("teacher")
+            section = data.get("section")
+            day_of_week = data.get("day_of_week")
+            period_slot = data.get("period_slot")
+
+        timetable = data.get("timetable") or (self.instance.timetable if self.instance else None)
+
+        if timetable and teacher and section and period_slot:
+            day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            day_name = day_names[day_of_week] if day_of_week < len(day_names) else f"Day {day_of_week}"
+            period_num = period_slot.period_number
+
+            # Optimized conflict check - only query potentially conflicting entries
+            # Check teacher conflict: same teacher, same day, same period
+            teacher_conflict_entry = TimetableEntry.objects.filter(
+                timetable=timetable,
+                teacher=teacher,
+                day_of_week=day_of_week,
+                period_slot=period_slot
+            ).exclude(id=self.instance.id if self.instance else None).select_related(
+                "section", "section__grade", "subject"
+            ).first()
+
+            if teacher_conflict_entry:
+                conflict_section = f"{teacher_conflict_entry.section.grade.name} - {teacher_conflict_entry.section.name}"
                 raise serializers.ValidationError({
-                    "conflicts": conflicts,
-                    "message": "Assignment creates conflicts",
+                    "message": f"{teacher.full_name} is already teaching {teacher_conflict_entry.subject.name} to {conflict_section} on {day_name}, Period {period_num}. Please select a different teacher or time slot.",
                 })
+
+            # Check section conflict: same section, same day, same period
+            section_conflict_entry = TimetableEntry.objects.filter(
+                timetable=timetable,
+                section=section,
+                day_of_week=day_of_week,
+                period_slot=period_slot
+            ).exclude(id=self.instance.id if self.instance else None).select_related(
+                "subject", "teacher"
+            ).first()
+
+            if section_conflict_entry:
+                section_name = f"{section.grade.name} - {section.name}"
+                raise serializers.ValidationError({
+                    "message": f"{section_name} already has {section_conflict_entry.subject.name} with {section_conflict_entry.teacher.full_name} on {day_name}, Period {period_num}. This section cannot have two classes at the same time.",
+                })
+
+            # Check room conflict if room is provided
+            room = data.get("room")
+            if room:
+                room_conflict_entry = TimetableEntry.objects.filter(
+                    timetable=timetable,
+                    room=room,
+                    day_of_week=day_of_week,
+                    period_slot=period_slot
+                ).exclude(id=self.instance.id if self.instance else None).select_related(
+                    "section", "section__grade", "subject"
+                ).first()
+
+                if room_conflict_entry:
+                    conflict_section = f"{room_conflict_entry.section.grade.name} - {room_conflict_entry.section.name}"
+                    raise serializers.ValidationError({
+                        "message": f"{room.name} is already booked for {conflict_section} ({room_conflict_entry.subject.name}) on {day_name}, Period {period_num}. Please select a different room.",
+                    })
 
         return data
 

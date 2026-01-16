@@ -1,6 +1,7 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Card,
@@ -11,9 +12,15 @@ import {
   Typography,
   Spin,
   Tabs,
-  Descriptions,
   Tooltip,
-  Dropdown,
+  Modal,
+  Form,
+  Select,
+  DatePicker,
+  Table,
+  Alert,
+  Input,
+  message,
 } from 'antd';
 import {
   ArrowLeftOutlined,
@@ -22,15 +29,15 @@ import {
   ClockCircleOutlined,
   HomeOutlined,
   HistoryOutlined,
-  FileExcelOutlined,
-  FilePdfOutlined,
-  MoreOutlined,
+  EditOutlined,
+  UserDeleteOutlined,
+  SwapOutlined,
   CheckCircleOutlined,
 } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import { AntdLayout } from '@/components/layout/AntdLayout';
-import { timetablesApi, sectionsApi, exportsApi } from '@/lib/api';
-import { DAY_NAMES, downloadBlob } from '@/lib/utils';
-import { message } from 'antd';
+import { timetablesApi, sectionsApi, subjectsApi, teachersApi, timetableEntriesApi, substitutionsApi } from '@/lib/api';
+import { DAY_NAMES } from '@/lib/utils';
 
 const { Text, Title } = Typography;
 
@@ -49,22 +56,206 @@ interface TimetableEntry {
   teacher_name: string;
 }
 
+interface EditingEntry {
+  id: string;
+  section: string;
+  section_name: string;
+  day_of_week: number;
+  day_name: string;
+  period_number: number;
+  period_slot: string;
+  subject: string;
+  subject_name: string;
+  teacher: string;
+  teacher_name: string;
+}
+
+interface TeacherScheduleEntry {
+  id: string;
+  section_name: string;
+  subject_name: string;
+  period_number: number;
+  day_of_week: number;
+}
+
+interface AvailableTeacher {
+  id: string;
+  name: string;
+  employee_id: string;
+  is_free_all_periods: boolean;
+  busy_periods: Array<{ period_number: number; section: string; subject: string }>;
+  free_period_count: number;
+}
+
+interface SubstitutionAssignment {
+  period_number: number;
+  substitute_teacher_id: string;
+}
+
 export default function TimetableViewPage() {
   const params = useParams();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const timetableId = params.id as string;
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<EditingEntry | null>(null);
+  const [editForm] = Form.useForm();
+
+  // Mark Teacher Absent state
+  const [absentModalOpen, setAbsentModalOpen] = useState(false);
+  const [selectedAbsentTeacher, setSelectedAbsentTeacher] = useState<string | null>(null);
+  const [selectedDate, setSelectedDate] = useState<dayjs.Dayjs>(dayjs());
+  const [absentReason, setAbsentReason] = useState('');
+  const [substitutionAssignments, setSubstitutionAssignments] = useState<Record<number, string>>({});
 
   const { data: timetableData, isLoading } = useQuery({
     queryKey: ['timetable', timetableId],
     queryFn: () => timetablesApi.get(timetableId),
   });
 
+  const timetable = timetableData?.data;
+  const branchId = timetable?.branch;
+
   const { data: sectionsData } = useQuery({
-    queryKey: ['sections'],
-    queryFn: () => sectionsApi.list(),
+    queryKey: ['sections', branchId],
+    queryFn: () => sectionsApi.list({ branch: branchId }),
+    enabled: !!branchId,
   });
 
-  const timetable = timetableData?.data;
+  // Fetch subjects filtered by timetable's branch for optimization
+  const { data: subjectsData } = useQuery({
+    queryKey: ['subjects', branchId],
+    queryFn: () => subjectsApi.list({ branch: branchId }),
+    enabled: !!branchId,
+  });
+
+  // Fetch teachers filtered by timetable's branch for optimization
+  const { data: teachersData } = useQuery({
+    queryKey: ['teachers', branchId],
+    queryFn: () => teachersApi.list({ branch: branchId }),
+    enabled: !!branchId,
+  });
+
+  // Get day of week from selected date (0 = Monday in our system)
+  const selectedDayOfWeek = selectedDate ? (selectedDate.day() === 0 ? 6 : selectedDate.day() - 1) : 0;
+
+  // Fetch absent teacher's schedule for the selected day
+  const { data: teacherScheduleData, isLoading: isLoadingSchedule } = useQuery({
+    queryKey: ['teacherSchedule', timetableId, selectedAbsentTeacher, selectedDayOfWeek],
+    queryFn: () => substitutionsApi.teacherSchedule(timetableId, selectedAbsentTeacher!, selectedDayOfWeek),
+    enabled: !!timetableId && !!selectedAbsentTeacher && absentModalOpen,
+  });
+
+  // Get period numbers from schedule
+  const teacherSchedule: TeacherScheduleEntry[] = teacherScheduleData?.data || [];
+  const periodNumbers = teacherSchedule.map((s) => s.period_number);
+
+  // Fetch available teachers for those periods
+  const { data: availableTeachersData, isLoading: isLoadingAvailable } = useQuery({
+    queryKey: ['availableTeachers', timetableId, selectedDayOfWeek, periodNumbers.join(',')],
+    queryFn: () => substitutionsApi.availableTeachers(timetableId, selectedDayOfWeek, periodNumbers),
+    enabled: !!timetableId && periodNumbers.length > 0 && absentModalOpen,
+  });
+
+  const availableTeachers: AvailableTeacher[] = availableTeachersData?.data || [];
+
+  // Mark absent mutation
+  const markAbsentMutation = useMutation({
+    mutationFn: (data: {
+      timetable_id: string;
+      absent_teacher_id: string;
+      date: string;
+      day_of_week: number;
+      substitutions: SubstitutionAssignment[];
+      reason?: string;
+    }) => substitutionsApi.markAbsent(data),
+    onSuccess: (response) => {
+      const count = response.data?.substitutions?.length || 0;
+      message.success(`Created ${count} substitution(s) successfully`);
+      setAbsentModalOpen(false);
+      resetAbsentForm();
+      queryClient.invalidateQueries({ queryKey: ['timetable', timetableId] });
+    },
+    onError: (error: any) => {
+      message.error(error.response?.data?.error || 'Failed to create substitutions');
+    },
+  });
+
+  const resetAbsentForm = () => {
+    setSelectedAbsentTeacher(null);
+    setSelectedDate(dayjs());
+    setAbsentReason('');
+    setSubstitutionAssignments({});
+  };
+
+  const handleMarkAbsentSubmit = () => {
+    if (!selectedAbsentTeacher || !selectedDate) {
+      message.error('Please select a teacher and date');
+      return;
+    }
+
+    const substitutions: SubstitutionAssignment[] = Object.entries(substitutionAssignments)
+      .filter(([_, teacherId]) => teacherId)
+      .map(([periodNum, teacherId]) => ({
+        period_number: parseInt(periodNum),
+        substitute_teacher_id: teacherId,
+      }));
+
+    if (substitutions.length === 0) {
+      message.error('Please assign at least one substitute teacher');
+      return;
+    }
+
+    markAbsentMutation.mutate({
+      timetable_id: timetableId,
+      absent_teacher_id: selectedAbsentTeacher,
+      date: selectedDate.format('YYYY-MM-DD'),
+      day_of_week: selectedDayOfWeek,
+      substitutions,
+      reason: absentReason || 'Teacher absent',
+    });
+  };
+
+  // Get teachers who are free for a specific period
+  const getFreeTeachersForPeriod = (periodNumber: number) => {
+    return availableTeachers.filter((t) => {
+      const isBusy = t.busy_periods.some((bp) => bp.period_number === periodNumber);
+      return !isBusy && t.id !== selectedAbsentTeacher;
+    });
+  };
+
+  const updateEntryMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: any }) =>
+      timetableEntriesApi.update(id, data),
+    onSuccess: () => {
+      message.success('Period updated successfully');
+      queryClient.invalidateQueries({ queryKey: ['timetable', timetableId] });
+      setEditModalOpen(false);
+      setEditingEntry(null);
+      editForm.resetFields();
+    },
+    onError: (error: any) => {
+      const errorData = error.response?.data;
+      // Handle detailed conflict message from details.message
+      const detailMessage = errorData?.details?.message;
+
+      if (detailMessage && Array.isArray(detailMessage) && detailMessage.length > 0) {
+        message.error(detailMessage[0], 5); // Show for 5 seconds
+      } else if (detailMessage && typeof detailMessage === 'string') {
+        message.error(detailMessage, 5);
+      } else if (errorData?.message && errorData.message !== 'Invalid request') {
+        message.error(errorData.message, 5);
+      } else if (errorData?.conflicts) {
+        message.error(`Conflict: ${errorData.conflicts.join(', ')}`, 5);
+      } else {
+        message.error('Failed to update period');
+      }
+    },
+  });
+
+  const subjects = subjectsData?.data?.results || subjectsData?.data || [];
+  const teachers = teachersData?.data?.results || teachersData?.data || [];
+
   const entriesRaw = timetable?.entries;
   const entries: TimetableEntry[] = Array.isArray(entriesRaw) ? entriesRaw : [];
   const sectionsRaw = sectionsData?.data?.results || sectionsData?.data;
@@ -82,33 +273,6 @@ export default function TimetableViewPage() {
   // Get unique periods
   const periods = [...new Set(entries.map((e) => e.period_number))].sort((a, b) => a - b);
 
-  const handleExport = async (format: string) => {
-    try {
-      message.loading({ content: 'Preparing export...', key: 'export' });
-      const response = await exportsApi.timetable(timetableId, format, 'school');
-
-      // Handle the response - response.data should be a Blob
-      const blob = response.data instanceof Blob
-        ? response.data
-        : new Blob([response.data], {
-            type: format === 'pdf'
-              ? 'application/pdf'
-              : format === 'xlsx'
-                ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                : 'text/csv',
-          });
-
-      downloadBlob(blob, `${timetable?.name || 'timetable'}.${format}`);
-      message.success({ content: 'Export downloaded successfully', key: 'export' });
-    } catch (error: any) {
-      console.error('Export error:', error);
-      message.error({
-        content: error.response?.data?.message || 'Export failed. Please try again.',
-        key: 'export'
-      });
-    }
-  };
-
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'published':
@@ -119,6 +283,43 @@ export default function TimetableViewPage() {
         return 'default';
       default:
         return 'default';
+    }
+  };
+
+  const handleEditClick = (entry: TimetableEntry) => {
+    setEditingEntry({
+      id: entry.id,
+      section: entry.section,
+      section_name: entry.section_name,
+      day_of_week: entry.day_of_week,
+      day_name: entry.day_name,
+      period_number: entry.period_number,
+      period_slot: (entry as any).period_slot,
+      subject: entry.subject,
+      subject_name: entry.subject_name,
+      teacher: entry.teacher,
+      teacher_name: entry.teacher_name,
+    });
+    editForm.setFieldsValue({
+      subject: entry.subject,
+      teacher: entry.teacher,
+    });
+    setEditModalOpen(true);
+  };
+
+  const handleEditSave = async () => {
+    if (!editingEntry) return;
+    try {
+      const values = await editForm.validateFields();
+      updateEntryMutation.mutate({
+        id: editingEntry.id,
+        data: {
+          subject: values.subject,
+          teacher: values.teacher,
+        },
+      });
+    } catch {
+      // Validation failed
     }
   };
 
@@ -238,8 +439,23 @@ export default function TimetableViewPage() {
                               textAlign: 'center',
                               backgroundColor: `${entry.subject_color}15`,
                               border: `1px solid ${entry.subject_color}30`,
+                              position: 'relative',
+                              cursor: 'pointer',
                             }}
+                            onClick={() => handleEditClick(entry)}
                           >
+                            <Tooltip title="Click to edit">
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  top: 4,
+                                  right: 4,
+                                  opacity: 0.5,
+                                }}
+                              >
+                                <EditOutlined style={{ fontSize: 10 }} />
+                              </div>
+                            </Tooltip>
                             <div
                               style={{
                                 fontWeight: 600,
@@ -290,16 +506,13 @@ export default function TimetableViewPage() {
       subtitle={`${timetable.session_name} | ${timetable.shift_name}${timetable.season_name ? ` | ${timetable.season_name}` : ''}`}
       extra={
         <Space>
-          <Tooltip title="Export Excel">
-            <Button icon={<FileExcelOutlined />} onClick={() => handleExport('xlsx')}>
-              Excel
-            </Button>
-          </Tooltip>
-          <Tooltip title="Export PDF">
-            <Button icon={<FilePdfOutlined />} onClick={() => handleExport('pdf')}>
-              PDF
-            </Button>
-          </Tooltip>
+          <Button
+            type="primary"
+            icon={<UserDeleteOutlined />}
+            onClick={() => setAbsentModalOpen(true)}
+          >
+            Mark Teacher Absent
+          </Button>
           <Button
             icon={<HistoryOutlined />}
             onClick={() => router.push(`/timetables/${timetableId}/versions`)}
@@ -359,6 +572,312 @@ export default function TimetableViewPage() {
           <Tabs items={sectionTabs} />
         </Card>
       )}
+
+      {/* Edit Period Modal */}
+      <Modal
+        title="Edit Period"
+        open={editModalOpen}
+        onCancel={() => {
+          setEditModalOpen(false);
+          setEditingEntry(null);
+          editForm.resetFields();
+        }}
+        onOk={handleEditSave}
+        confirmLoading={updateEntryMutation.isPending}
+        okText="Save Changes"
+      >
+        {editingEntry && (
+          <>
+            <div style={{ marginBottom: 16, padding: 12, background: '#f5f5f5', borderRadius: 8 }}>
+              <Space direction="vertical" size={4}>
+                <Text strong>{editingEntry.section_name}</Text>
+                <Text type="secondary">
+                  {editingEntry.day_name} - Period {editingEntry.period_number}
+                </Text>
+              </Space>
+            </div>
+            <Form form={editForm} layout="vertical">
+              <Form.Item
+                name="subject"
+                label="Subject"
+                rules={[{ required: true, message: 'Please select a subject' }]}
+              >
+                <Select
+                  placeholder="Select subject"
+                  showSearch
+                  optionFilterProp="label"
+                  options={subjects.map((subject: any) => ({
+                    value: subject.id,
+                    label: subject.name,
+                  }))}
+                  optionRender={(option) => {
+                    const subject = subjects.find((s: any) => s.id === option.value);
+                    return (
+                      <Space>
+                        <div
+                          style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: 2,
+                            backgroundColor: subject?.color || '#1890ff',
+                          }}
+                        />
+                        {option.label}
+                      </Space>
+                    );
+                  }}
+                />
+              </Form.Item>
+              <Form.Item
+                name="teacher"
+                label="Teacher"
+                rules={[{ required: true, message: 'Please select a teacher' }]}
+              >
+                <Select
+                  placeholder="Select teacher"
+                  showSearch
+                  optionFilterProp="label"
+                  options={teachers.map((teacher: any) => ({
+                    value: teacher.id,
+                    label: teacher.full_name || `${teacher.first_name || ''} ${teacher.last_name || ''}`.trim() || teacher.email || 'Unknown',
+                  }))}
+                />
+              </Form.Item>
+            </Form>
+          </>
+        )}
+      </Modal>
+
+      {/* Mark Teacher Absent Modal */}
+      <Modal
+        title={
+          <Space>
+            <UserDeleteOutlined />
+            Mark Teacher Absent
+          </Space>
+        }
+        open={absentModalOpen}
+        onCancel={() => {
+          setAbsentModalOpen(false);
+          resetAbsentForm();
+        }}
+        width={800}
+        footer={[
+          <Button
+            key="cancel"
+            onClick={() => {
+              setAbsentModalOpen(false);
+              resetAbsentForm();
+            }}
+          >
+            Cancel
+          </Button>,
+          <Button
+            key="submit"
+            type="primary"
+            icon={<CheckCircleOutlined />}
+            loading={markAbsentMutation.isPending}
+            onClick={handleMarkAbsentSubmit}
+            disabled={!selectedAbsentTeacher || teacherSchedule.length === 0}
+          >
+            Assign Substitutes
+          </Button>,
+        ]}
+      >
+        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          {/* Step 1: Select Teacher and Date */}
+          <Card size="small" title="Step 1: Select Absent Teacher & Date">
+            <Space size="large" wrap>
+              <div>
+                <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+                  Date
+                </Text>
+                <DatePicker
+                  value={selectedDate}
+                  onChange={(date) => {
+                    setSelectedDate(date || dayjs());
+                    setSubstitutionAssignments({});
+                  }}
+                  style={{ width: 200 }}
+                  disabledDate={(current) => current && current < dayjs().startOf('day')}
+                />
+                {selectedDate && (
+                  <Tag color="blue" style={{ marginLeft: 8 }}>
+                    {DAY_NAMES[selectedDayOfWeek]}
+                  </Tag>
+                )}
+              </div>
+              <div style={{ minWidth: 300 }}>
+                <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+                  Absent Teacher
+                </Text>
+                <Select
+                  placeholder="Select teacher who is absent"
+                  value={selectedAbsentTeacher}
+                  onChange={(value) => {
+                    setSelectedAbsentTeacher(value);
+                    setSubstitutionAssignments({});
+                  }}
+                  showSearch
+                  optionFilterProp="label"
+                  style={{ width: '100%' }}
+                  options={teachers.map((t: any) => ({
+                    value: t.id,
+                    label: t.full_name || `${t.first_name} ${t.last_name}`,
+                  }))}
+                />
+              </div>
+              <div style={{ minWidth: 200 }}>
+                <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+                  Reason (Optional)
+                </Text>
+                <Input
+                  placeholder="e.g., Sick leave"
+                  value={absentReason}
+                  onChange={(e) => setAbsentReason(e.target.value)}
+                />
+              </div>
+            </Space>
+          </Card>
+
+          {/* Step 2: Show Schedule and Assign Substitutes */}
+          {selectedAbsentTeacher && (
+            <Card size="small" title="Step 2: Assign Substitute Teachers">
+              {isLoadingSchedule ? (
+                <div style={{ textAlign: 'center', padding: 40 }}>
+                  <Spin />
+                  <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                    Loading teacher schedule...
+                  </Text>
+                </div>
+              ) : teacherSchedule.length === 0 ? (
+                <Alert
+                  type="info"
+                  message="No Classes Found"
+                  description={`This teacher has no classes scheduled for ${DAY_NAMES[selectedDayOfWeek]}.`}
+                />
+              ) : (
+                <>
+                  <Alert
+                    type="warning"
+                    message={`${teacherSchedule.length} period(s) need substitute teachers`}
+                    style={{ marginBottom: 16 }}
+                  />
+                  <Table
+                    dataSource={teacherSchedule}
+                    rowKey="id"
+                    pagination={false}
+                    size="small"
+                    columns={[
+                      {
+                        title: 'Period',
+                        dataIndex: 'period_number',
+                        key: 'period_number',
+                        width: 80,
+                        render: (num: number) => (
+                          <Tag color="blue">P{num}</Tag>
+                        ),
+                      },
+                      {
+                        title: 'Section',
+                        dataIndex: 'section_name',
+                        key: 'section_name',
+                        width: 150,
+                      },
+                      {
+                        title: 'Subject',
+                        dataIndex: 'subject_name',
+                        key: 'subject_name',
+                        width: 150,
+                      },
+                      {
+                        title: 'Substitute Teacher',
+                        key: 'substitute',
+                        render: (_: any, record: TeacherScheduleEntry) => {
+                          const freeTeachers = getFreeTeachersForPeriod(record.period_number);
+                          const assigned = substitutionAssignments[record.period_number];
+
+                          return (
+                            <Select
+                              placeholder="Select substitute"
+                              value={assigned}
+                              onChange={(value) => {
+                                setSubstitutionAssignments((prev) => ({
+                                  ...prev,
+                                  [record.period_number]: value,
+                                }));
+                              }}
+                              style={{ width: '100%' }}
+                              showSearch
+                              optionFilterProp="label"
+                              allowClear
+                            >
+                              {freeTeachers.length > 0 && (
+                                <Select.OptGroup label="Free Teachers">
+                                  {freeTeachers.map((t) => (
+                                    <Select.Option key={t.id} value={t.id} label={t.name}>
+                                      <Space>
+                                        <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                                        {t.name}
+                                      </Space>
+                                    </Select.Option>
+                                  ))}
+                                </Select.OptGroup>
+                              )}
+                              <Select.OptGroup label="All Teachers">
+                                {teachers
+                                  .filter((t: any) => t.id !== selectedAbsentTeacher)
+                                  .map((t: any) => {
+                                    const isFree = freeTeachers.some((ft) => ft.id === t.id);
+                                    if (isFree) return null;
+                                    const teacherAvail = availableTeachers.find((at) => at.id === t.id);
+                                    const isBusy = teacherAvail?.busy_periods.some(
+                                      (bp) => bp.period_number === record.period_number
+                                    );
+                                    return (
+                                      <Select.Option
+                                        key={t.id}
+                                        value={t.id}
+                                        label={t.full_name}
+                                        disabled={isBusy}
+                                      >
+                                        <Space>
+                                          {isBusy ? (
+                                            <SwapOutlined style={{ color: '#ff4d4f' }} />
+                                          ) : (
+                                            <SwapOutlined style={{ color: '#faad14' }} />
+                                          )}
+                                          <span style={{ color: isBusy ? '#999' : undefined }}>
+                                            {t.full_name || `${t.first_name} ${t.last_name}`}
+                                          </span>
+                                          {isBusy && (
+                                            <Text type="secondary" style={{ fontSize: 11 }}>
+                                              (Busy)
+                                            </Text>
+                                          )}
+                                        </Space>
+                                      </Select.Option>
+                                    );
+                                  })}
+                              </Select.OptGroup>
+                            </Select>
+                          );
+                        },
+                      },
+                    ]}
+                  />
+                  <div style={{ marginTop: 16, textAlign: 'right' }}>
+                    <Text type="secondary">
+                      {Object.values(substitutionAssignments).filter(Boolean).length} of{' '}
+                      {teacherSchedule.length} periods assigned
+                    </Text>
+                  </div>
+                </>
+              )}
+            </Card>
+          )}
+        </Space>
+      </Modal>
     </AntdLayout>
   );
 }

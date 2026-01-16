@@ -415,6 +415,239 @@ class SubstitutionViewSet(viewsets.ModelViewSet):
         substitution.save()
         return Response({"message": "Substitution cancelled"})
 
+    @action(detail=False, methods=["get"])
+    def teacher_schedule(self, request):
+        """
+        Get a teacher's schedule for a specific day in a timetable.
+        Query params: timetable_id, teacher_id, day_of_week
+        """
+        from datetime import date
+
+        timetable_id = request.query_params.get("timetable_id")
+        teacher_id = request.query_params.get("teacher_id")
+        day_of_week = request.query_params.get("day_of_week")
+
+        if not all([timetable_id, teacher_id]):
+            return Response(
+                {"error": "timetable_id and teacher_id are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        entries = TimetableEntry.objects.filter(
+            timetable_id=timetable_id,
+            teacher_id=teacher_id
+        ).select_related(
+            "section", "section__grade", "subject", "period_slot"
+        )
+
+        if day_of_week is not None:
+            entries = entries.filter(day_of_week=int(day_of_week))
+
+        entries = entries.order_by("day_of_week", "period_slot__period_number")
+
+        serializer = TimetableEntrySerializer(entries, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def available_teachers(self, request):
+        """
+        Get teachers who are free at specific time slots.
+        Query params: timetable_id, day_of_week, period_numbers (comma-separated)
+        Returns teachers not assigned to any period in the given slots.
+        """
+        from apps.academics.models import Teacher
+
+        timetable_id = request.query_params.get("timetable_id")
+        day_of_week = request.query_params.get("day_of_week")
+        period_numbers = request.query_params.get("period_numbers", "")
+
+        if not all([timetable_id, day_of_week]):
+            return Response(
+                {"error": "timetable_id and day_of_week are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            timetable = Timetable.objects.get(id=timetable_id)
+        except Timetable.DoesNotExist:
+            return Response(
+                {"error": "Timetable not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Get all teachers in the branch
+        all_teachers = Teacher.objects.filter(
+            branch=timetable.branch,
+            status="active"
+        )
+
+        # Parse period numbers
+        periods = []
+        if period_numbers:
+            periods = [int(p.strip()) for p in period_numbers.split(",") if p.strip()]
+
+        # Get period slots for these period numbers
+        period_slots = PeriodSlot.objects.filter(
+            template__branch=timetable.branch,
+            template__shift=timetable.shift
+        )
+        if periods:
+            period_slots = period_slots.filter(period_number__in=periods)
+        period_slot_ids = list(period_slots.values_list("id", flat=True))
+
+        # Find busy teachers for the day/periods
+        busy_query = TimetableEntry.objects.filter(
+            timetable_id=timetable_id,
+            day_of_week=int(day_of_week)
+        )
+        if period_slot_ids:
+            busy_query = busy_query.filter(period_slot_id__in=period_slot_ids)
+
+        busy_teacher_ids = set(busy_query.values_list("teacher_id", flat=True))
+
+        # Build response with availability per period
+        result = []
+        for teacher in all_teachers:
+            teacher_busy_periods = []
+            if period_slot_ids:
+                teacher_entries = TimetableEntry.objects.filter(
+                    timetable_id=timetable_id,
+                    teacher_id=teacher.id,
+                    day_of_week=int(day_of_week),
+                    period_slot_id__in=period_slot_ids
+                ).select_related("period_slot", "section", "section__grade", "subject")
+
+                for entry in teacher_entries:
+                    teacher_busy_periods.append({
+                        "period_number": entry.period_slot.period_number,
+                        "section": f"{entry.section.grade.name} - {entry.section.name}",
+                        "subject": entry.subject.name
+                    })
+
+            is_free_all = str(teacher.id) not in [str(tid) for tid in busy_teacher_ids]
+
+            result.append({
+                "id": str(teacher.id),
+                "name": teacher.full_name,
+                "employee_id": teacher.employee_id,
+                "is_free_all_periods": is_free_all,
+                "busy_periods": teacher_busy_periods,
+                "free_period_count": len(periods) - len(teacher_busy_periods) if periods else 0
+            })
+
+        # Sort by free period count (most free first)
+        result.sort(key=lambda x: (-x["free_period_count"], x["name"]))
+
+        return Response(result)
+
+    @action(detail=False, methods=["post"])
+    def mark_absent(self, request):
+        """
+        Mark a teacher as absent and create substitutions for their periods.
+        Expects: {
+            timetable_id: uuid,
+            absent_teacher_id: uuid,
+            date: "YYYY-MM-DD",
+            day_of_week: int,
+            substitutions: [
+                { period_number: int, substitute_teacher_id: uuid },
+                ...
+            ],
+            reason: string (optional)
+        }
+        """
+        from datetime import datetime
+        from apps.academics.models import Teacher
+
+        data = request.data
+        timetable_id = data.get("timetable_id")
+        absent_teacher_id = data.get("absent_teacher_id")
+        absence_date = data.get("date")
+        day_of_week = data.get("day_of_week")
+        substitutions_data = data.get("substitutions", [])
+        reason = data.get("reason", "Teacher absent")
+
+        # Validate required fields
+        if not all([timetable_id, absent_teacher_id, absence_date, day_of_week is not None]):
+            return Response(
+                {"error": "timetable_id, absent_teacher_id, date, and day_of_week are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            timetable = Timetable.objects.get(id=timetable_id)
+            absent_teacher = Teacher.objects.get(id=absent_teacher_id)
+        except (Timetable.DoesNotExist, Teacher.DoesNotExist) as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Parse date
+        try:
+            parsed_date = datetime.strptime(absence_date, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Get all entries for the absent teacher on that day
+        absent_entries = TimetableEntry.objects.filter(
+            timetable_id=timetable_id,
+            teacher_id=absent_teacher_id,
+            day_of_week=int(day_of_week)
+        ).select_related("period_slot")
+
+        # Build a map of period_number -> substitute_teacher_id
+        sub_map = {s["period_number"]: s["substitute_teacher_id"] for s in substitutions_data}
+
+        created_substitutions = []
+        skipped_periods = []
+
+        with transaction.atomic():
+            for entry in absent_entries:
+                period_num = entry.period_slot.period_number
+                substitute_id = sub_map.get(period_num)
+
+                if not substitute_id:
+                    skipped_periods.append(period_num)
+                    continue
+
+                # Check if substitution already exists for this entry and date
+                existing = Substitution.objects.filter(
+                    original_entry=entry,
+                    date=parsed_date,
+                    is_active=True
+                ).first()
+
+                if existing:
+                    # Update existing substitution
+                    existing.substitute_teacher_id = substitute_id
+                    existing.reason = reason
+                    existing.save()
+                    created_substitutions.append(existing)
+                else:
+                    # Create new substitution
+                    sub = Substitution.objects.create(
+                        timetable=timetable,
+                        original_entry=entry,
+                        substitute_teacher_id=substitute_id,
+                        substitution_type="single_period",
+                        date=parsed_date,
+                        reason=reason,
+                        is_active=True,
+                        created_by=request.user
+                    )
+                    created_substitutions.append(sub)
+
+        serializer = SubstitutionSerializer(created_substitutions, many=True)
+        return Response({
+            "message": f"Created {len(created_substitutions)} substitutions",
+            "substitutions": serializer.data,
+            "skipped_periods": skipped_periods
+        }, status=status.HTTP_201_CREATED)
+
 
 class ConflictViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Conflict.objects.all()

@@ -7,6 +7,7 @@ from .views import (
     LoginView,
     LogoutView,
     PasswordChangeView,
+    RegisterSchoolView,
     UserActivityViewSet,
     UserViewSet,
 )
@@ -16,6 +17,7 @@ router.register(r"users", UserViewSet, basename="users")
 router.register(r"activities", UserActivityViewSet, basename="activities")
 
 urlpatterns = [
+    path("register/", RegisterSchoolView.as_view(), name="register"),
     path("login/", LoginView.as_view(), name="login"),
     path("logout/", LogoutView.as_view(), name="logout"),
     path("refresh/", TokenRefreshView.as_view(), name="token_refresh"),

@@ -39,6 +39,7 @@ from .serializers import (
     TeacherDetailSerializer,
     TeacherImportSerializer,
     TeacherListSerializer,
+    TeacherReplacementSerializer,
 )
 
 
@@ -162,6 +163,119 @@ class TeacherViewSet(TenantFilterMixin, viewsets.ModelViewSet):
                 created.append(serializer.data)
 
         return Response(created, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"])
+    def replace(self, request):
+        """
+        Replace a departing teacher with a new one.
+        Transfers all assignments and timetable entries.
+        """
+        serializer = TeacherReplacementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        departing_teacher = data["departing_teacher"]
+        replacement_teacher = data["replacement_teacher"]
+        transfer_assignments = data.get("transfer_assignments", True)
+        transfer_timetable_entries = data.get("transfer_timetable_entries", True)
+
+        from datetime import date
+        from apps.timetable.models import TimetableEntry
+
+        results = {
+            "assignments_transferred": 0,
+            "timetable_entries_transferred": 0,
+            "departing_teacher": departing_teacher.full_name,
+            "replacement_teacher": replacement_teacher.full_name,
+        }
+
+        with transaction.atomic():
+            # Transfer assignments
+            if transfer_assignments:
+                assignments_updated = Assignment.objects.filter(
+                    teacher=departing_teacher,
+                    is_active=True
+                ).update(teacher=replacement_teacher)
+                results["assignments_transferred"] = assignments_updated
+
+            # Transfer timetable entries
+            if transfer_timetable_entries:
+                entries_updated = TimetableEntry.objects.filter(
+                    teacher=departing_teacher
+                ).update(teacher=replacement_teacher)
+                results["timetable_entries_transferred"] = entries_updated
+
+            # Update departing teacher status
+            departing_teacher.status = data.get("status", "resigned")
+            departing_teacher.departure_date = data.get("departure_date", date.today())
+            departing_teacher.departure_reason = data.get("departure_reason", "")
+            departing_teacher.replaced_by = replacement_teacher
+            departing_teacher.is_active = False
+            departing_teacher.save()
+
+            # Copy subjects from departing to replacement teacher
+            for subject in departing_teacher.subjects.all():
+                replacement_teacher.subjects.add(subject)
+
+        return Response({
+            "message": "Teacher replacement completed successfully",
+            "results": results,
+        })
+
+    @action(detail=False, methods=["get"])
+    def needs_replacement(self, request):
+        """Get list of teachers who have left and need replacement"""
+        queryset = self.get_queryset().filter(
+            status__in=["resigned", "terminated"],
+            replaced_by__isnull=True
+        )
+
+        # Filter to only those with active assignments
+        teachers_needing_replacement = []
+        for teacher in queryset:
+            active_assignments = teacher.assignments.filter(is_active=True).count()
+            if active_assignments > 0:
+                teachers_needing_replacement.append({
+                    "id": str(teacher.id),
+                    "full_name": teacher.full_name,
+                    "employee_code": teacher.employee_code,
+                    "status": teacher.status,
+                    "departure_date": teacher.departure_date,
+                    "active_assignments": active_assignments,
+                    "subjects": [s.name for s in teacher.subjects.all()],
+                })
+
+        return Response(teachers_needing_replacement)
+
+    @action(detail=True, methods=["post"])
+    def mark_departed(self, request, pk=None):
+        """Mark a teacher as departed (resigned/terminated)"""
+        teacher = self.get_object()
+
+        status_value = request.data.get("status", "resigned")
+        if status_value not in ["resigned", "terminated"]:
+            return Response(
+                {"error": "Status must be 'resigned' or 'terminated'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from datetime import date
+
+        teacher.status = status_value
+        teacher.departure_date = request.data.get("departure_date", date.today())
+        teacher.departure_reason = request.data.get("departure_reason", "")
+        teacher.is_active = False
+        teacher.save()
+
+        # Get count of assignments that need attention
+        active_assignments = teacher.assignments.filter(is_active=True).count()
+
+        return Response({
+            "message": f"Teacher marked as {status_value}",
+            "teacher_id": str(teacher.id),
+            "teacher_name": teacher.full_name,
+            "active_assignments_needing_replacement": active_assignments,
+        })
 
 
 class TeacherAvailabilityViewSet(viewsets.ModelViewSet):

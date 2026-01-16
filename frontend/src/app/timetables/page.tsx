@@ -21,6 +21,7 @@ import {
   Typography,
   Dropdown,
   Modal,
+  Alert,
 } from 'antd';
 import {
   PlusOutlined,
@@ -78,6 +79,8 @@ export default function TimetablesPage() {
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [selectedTimetable, setSelectedTimetable] = useState<Timetable | null>(null);
   const [changeNote, setChangeNote] = useState('');
+  const [selectedBranchId, setSelectedBranchId] = useState<string>('');
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('');
 
   const { data: timetablesData, isLoading, refetch } = useQuery({
     queryKey: ['timetables'],
@@ -116,6 +119,8 @@ export default function TimetablesPage() {
       }
       setDrawerOpen(false);
       form.resetFields();
+      setSelectedBranchId('');
+      setSelectedSessionId('');
     },
     onError: (error: any) => {
       const errorData = error.response?.data;
@@ -179,11 +184,23 @@ export default function TimetablesPage() {
   const branchesRaw = branchesData?.data?.results || branchesData?.data;
   const branches = Array.isArray(branchesRaw) ? branchesRaw : [];
   const sessionsRaw = sessionsData?.data?.results || sessionsData?.data;
-  const sessions = Array.isArray(sessionsRaw) ? sessionsRaw : [];
+  const allSessions = Array.isArray(sessionsRaw) ? sessionsRaw : [];
   const shiftsRaw = shiftsData?.data?.results || shiftsData?.data;
-  const shifts = Array.isArray(shiftsRaw) ? shiftsRaw : [];
+  const allShifts = Array.isArray(shiftsRaw) ? shiftsRaw : [];
   const seasonsRaw = seasonsData?.data?.results || seasonsData?.data;
-  const seasons = Array.isArray(seasonsRaw) ? seasonsRaw : [];
+  const allSeasons = Array.isArray(seasonsRaw) ? seasonsRaw : [];
+
+  // Filter sessions and shifts based on selected branch
+  const sessions = selectedBranchId
+    ? allSessions.filter((s: any) => s.branch === selectedBranchId)
+    : [];
+  const shifts = selectedBranchId
+    ? allShifts.filter((s: any) => s.branch === selectedBranchId)
+    : [];
+  // Filter seasons based on selected session
+  const seasons = selectedSessionId
+    ? allSeasons.filter((s: any) => s.session === selectedSessionId)
+    : [];
 
   const publishedCount = timetables.filter((t) => t.status === 'published').length;
   const draftCount = timetables.filter((t) => t.status === 'draft').length;
@@ -400,6 +417,8 @@ export default function TimetablesPage() {
         onClose={() => {
           setDrawerOpen(false);
           form.resetFields();
+          setSelectedBranchId('');
+          setSelectedSessionId('');
         }}
         open={drawerOpen}
         extra={
@@ -416,6 +435,13 @@ export default function TimetablesPage() {
           </Space>
         }
       >
+        <Alert
+          message="Prerequisites"
+          description="Before generating, ensure you have configured: Period Templates, Sections (with Shift), and Subject Assignments for the selected branch/shift combination."
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
         <Form
           form={form}
           layout="vertical"
@@ -439,7 +465,14 @@ export default function TimetablesPage() {
             label="Branch"
             rules={[{ required: true, message: 'Please select a branch' }]}
           >
-            <Select placeholder="Select branch">
+            <Select
+              placeholder="Select branch"
+              onChange={(value) => {
+                setSelectedBranchId(value);
+                setSelectedSessionId('');
+                form.setFieldsValue({ session_id: undefined, shift_id: undefined, season_id: undefined });
+              }}
+            >
               {branches.map((branch: any) => (
                 <Select.Option key={branch.id} value={branch.id}>
                   {branch.name}
@@ -455,7 +488,14 @@ export default function TimetablesPage() {
                 label="Session"
                 rules={[{ required: true, message: 'Please select a session' }]}
               >
-                <Select placeholder="Select session">
+                <Select
+                  placeholder={selectedBranchId ? "Select session" : "Select branch first"}
+                  disabled={!selectedBranchId}
+                  onChange={(value) => {
+                    setSelectedSessionId(value);
+                    form.setFieldsValue({ season_id: undefined });
+                  }}
+                >
                   {sessions.map((session: any) => (
                     <Select.Option key={session.id} value={session.id}>
                       {session.name}
@@ -470,7 +510,10 @@ export default function TimetablesPage() {
                 label="Shift"
                 rules={[{ required: true, message: 'Please select a shift' }]}
               >
-                <Select placeholder="Select shift">
+                <Select
+                  placeholder={selectedBranchId ? "Select shift" : "Select branch first"}
+                  disabled={!selectedBranchId}
+                >
                   {shifts.map((shift: any) => (
                     <Select.Option key={shift.id} value={shift.id}>
                       {shift.name}
@@ -482,7 +525,11 @@ export default function TimetablesPage() {
           </Row>
 
           <Form.Item name="season_id" label="Season (Optional)">
-            <Select placeholder="Select season (optional)" allowClear>
+            <Select
+              placeholder={selectedSessionId ? "Select season (optional)" : "Select session first"}
+              disabled={!selectedSessionId}
+              allowClear
+            >
               {seasons.map((season: any) => (
                 <Select.Option key={season.id} value={season.id}>
                   {season.name}

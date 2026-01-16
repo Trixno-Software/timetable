@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Card,
@@ -22,6 +22,8 @@ import {
   Statistic,
   Empty,
   Typography,
+  Tabs,
+  Divider,
 } from 'antd';
 import {
   PlusOutlined,
@@ -33,13 +35,15 @@ import {
   StopOutlined,
   TeamOutlined,
   ArrowRightOutlined,
+  PrinterOutlined,
+  CalendarOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { AntdLayout } from '@/components/layout/AntdLayout';
 import { substitutionsApi, timetablesApi, teachersApi, sectionsApi } from '@/lib/api';
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 
 interface Substitution {
   id: string;
@@ -67,6 +71,8 @@ export default function SubstitutionsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingSubstitution, setEditingSubstitution] = useState<Substitution | null>(null);
   const [searchText, setSearchText] = useState('');
+  const [activeTab, setActiveTab] = useState('today');
+  const printRef = useRef<HTMLDivElement>(null);
 
   const { data: substitutionsData, isLoading, refetch } = useQuery({
     queryKey: ['substitutions'],
@@ -219,6 +225,111 @@ export default function SubstitutionsPage() {
   const activeCount = substitutions.filter((s) => s.status === 'active').length;
   const pendingCount = substitutions.filter((s) => s.status === 'pending').length;
 
+  // Filter today's substitutions
+  const today = dayjs().format('YYYY-MM-DD');
+  const todaySubstitutions = substitutions.filter((s) => {
+    if (!s.is_active) return false;
+    // Check if today falls within the substitution date range
+    const startDate = s.start_date || s.date;
+    const endDate = s.end_date || s.date;
+    return today >= startDate && today <= endDate;
+  });
+
+  // Group today's substitutions by period for better display
+  const todayByPeriod = todaySubstitutions.reduce((acc, sub) => {
+    const period = sub.period_number || 0;
+    if (!acc[period]) acc[period] = [];
+    acc[period].push(sub);
+    return acc;
+  }, {} as Record<number, Substitution[]>);
+
+  const sortedPeriods = Object.keys(todayByPeriod).map(Number).sort((a, b) => a - b);
+
+  // Print function
+  const handlePrint = () => {
+    const printContent = printRef.current;
+    if (!printContent) return;
+
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      message.error('Please allow popups to print');
+      return;
+    }
+
+    const styles = `
+      <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 15px; }
+        .header h1 { margin: 0; font-size: 24px; }
+        .header .date { font-size: 18px; color: #666; margin-top: 5px; }
+        .header .school { font-size: 14px; color: #888; margin-top: 5px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #333; padding: 10px; text-align: left; }
+        th { background-color: #f0f0f0; font-weight: bold; }
+        .period-header { background-color: #e6f7ff; font-weight: bold; }
+        .arrow { color: #1677ff; }
+        .footer { margin-top: 30px; text-align: center; font-size: 12px; color: #888; border-top: 1px solid #ccc; padding-top: 10px; }
+        @media print { body { -webkit-print-color-adjust: exact; } }
+      </style>
+    `;
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Today's Substitutions - ${dayjs().format('DD MMM YYYY')}</title>
+          ${styles}
+        </head>
+        <body>
+          <div class="header">
+            <h1>TEACHER SUBSTITUTION NOTICE</h1>
+            <div class="date">${dayjs().format('dddd, DD MMMM YYYY')}</div>
+          </div>
+          ${todaySubstitutions.length === 0
+            ? '<p style="text-align: center; font-size: 16px; color: #666;">No substitutions scheduled for today.</p>'
+            : `
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 80px;">Period</th>
+                    <th>Section</th>
+                    <th>Subject</th>
+                    <th>Absent Teacher</th>
+                    <th>Substitute Teacher</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${todaySubstitutions
+                    .sort((a, b) => (a.period_number || 0) - (b.period_number || 0))
+                    .map(sub => `
+                      <tr>
+                        <td><strong>P${sub.period_number || 'All'}</strong></td>
+                        <td>${sub.section_name || '-'}</td>
+                        <td>${(sub as any).subject_name || '-'}</td>
+                        <td>${sub.original_teacher_name}</td>
+                        <td><strong>${sub.substitute_teacher_name}</strong></td>
+                        <td>${sub.reason || '-'}</td>
+                      </tr>
+                    `).join('')}
+                </tbody>
+              </table>
+            `
+          }
+          <div class="footer">
+            Generated on ${dayjs().format('DD/MM/YYYY HH:mm')} | Total: ${todaySubstitutions.length} substitution(s)
+          </div>
+        </body>
+      </html>
+    `);
+
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+    }, 250);
+  };
+
   const columns: ColumnsType<Substitution> = [
     {
       title: 'Teachers',
@@ -325,82 +436,214 @@ export default function SubstitutionsPage() {
       title="Substitutions"
       subtitle="Handle teacher substitutions and replacements"
       extra={
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => openDrawer()}>
-          Add Substitution
-        </Button>
+        <Space>
+          {activeTab === 'today' && todaySubstitutions.length > 0 && (
+            <Button icon={<PrinterOutlined />} onClick={handlePrint}>
+              Print Notice
+            </Button>
+          )}
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => openDrawer()}>
+            Add Substitution
+          </Button>
+        </Space>
       }
     >
-      {/* Statistics */}
-      <Row gutter={16} style={{ marginBottom: 24 }}>
-        <Col xs={8}>
-          <Card>
-            <Statistic
-              title="Total Substitutions"
-              value={substitutions.length}
-              prefix={<SwapOutlined />}
-            />
-          </Card>
-        </Col>
-        <Col xs={8}>
-          <Card>
-            <Statistic
-              title="Active"
-              value={activeCount}
-              valueStyle={{ color: '#52c41a' }}
-            />
-          </Card>
-        </Col>
-        <Col xs={8}>
-          <Card>
-            <Statistic
-              title="Pending"
-              value={pendingCount}
-              valueStyle={{ color: '#faad14' }}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      {/* Table */}
-      <Card>
-        <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
-          <Input
-            placeholder="Search by teacher or section..."
-            prefix={<SearchOutlined />}
-            style={{ width: 300 }}
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            allowClear
-          />
-          <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
-            Refresh
-          </Button>
-        </div>
-
-        <Table
-          columns={columns}
-          dataSource={filteredSubstitutions}
-          rowKey="id"
-          loading={isLoading}
-          pagination={{
-            pageSize: 10,
-            showSizeChanger: true,
-            showTotal: (total) => `Total ${total} substitutions`,
-          }}
-          locale={{
-            emptyText: (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No substitutions found"
-              >
-                <Button type="primary" icon={<PlusOutlined />} onClick={() => openDrawer()}>
-                  Add Substitution
-                </Button>
-              </Empty>
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          {
+            key: 'today',
+            label: (
+              <Space>
+                <CalendarOutlined />
+                Today's Notice
+                {todaySubstitutions.length > 0 && (
+                  <Tag color="red">{todaySubstitutions.length}</Tag>
+                )}
+              </Space>
             ),
-          }}
-        />
-      </Card>
+            children: (
+              <>
+                {/* Today's Notice Header */}
+                <Card style={{ marginBottom: 24, textAlign: 'center' }}>
+                  <Title level={3} style={{ margin: 0 }}>
+                    Teacher Substitution Notice
+                  </Title>
+                  <Text style={{ fontSize: 18 }}>
+                    {dayjs().format('dddd, DD MMMM YYYY')}
+                  </Text>
+                  <div style={{ marginTop: 16 }}>
+                    <Tag color={todaySubstitutions.length > 0 ? 'orange' : 'green'} style={{ fontSize: 14, padding: '4px 12px' }}>
+                      {todaySubstitutions.length} Substitution{todaySubstitutions.length !== 1 ? 's' : ''} Today
+                    </Tag>
+                  </div>
+                </Card>
+
+                {/* Today's Substitutions Table */}
+                <Card ref={printRef}>
+                  {todaySubstitutions.length === 0 ? (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description={
+                        <Space direction="vertical">
+                          <Text>No substitutions scheduled for today</Text>
+                          <Text type="secondary">All teachers are present!</Text>
+                        </Space>
+                      }
+                    />
+                  ) : (
+                    <Table
+                      dataSource={todaySubstitutions.sort((a, b) => (a.period_number || 0) - (b.period_number || 0))}
+                      rowKey="id"
+                      pagination={false}
+                      size="middle"
+                      columns={[
+                        {
+                          title: 'Period',
+                          key: 'period',
+                          width: 100,
+                          render: (_, record) => (
+                            <Tag color="blue" style={{ fontSize: 14, fontWeight: 'bold' }}>
+                              P{record.period_number || 'All'}
+                            </Tag>
+                          ),
+                        },
+                        {
+                          title: 'Section',
+                          dataIndex: 'section_name',
+                          key: 'section',
+                          render: (name) => (
+                            <Tag icon={<TeamOutlined />} color="purple">
+                              {name}
+                            </Tag>
+                          ),
+                        },
+                        {
+                          title: 'Absent Teacher',
+                          dataIndex: 'original_teacher_name',
+                          key: 'original',
+                          render: (name) => (
+                            <Text delete type="secondary">{name}</Text>
+                          ),
+                        },
+                        {
+                          title: '',
+                          key: 'arrow',
+                          width: 50,
+                          render: () => (
+                            <ArrowRightOutlined style={{ color: '#1677ff', fontSize: 16 }} />
+                          ),
+                        },
+                        {
+                          title: 'Substitute Teacher',
+                          dataIndex: 'substitute_teacher_name',
+                          key: 'substitute',
+                          render: (name) => (
+                            <Text strong style={{ color: '#52c41a', fontSize: 15 }}>{name}</Text>
+                          ),
+                        },
+                        {
+                          title: 'Reason',
+                          dataIndex: 'reason',
+                          key: 'reason',
+                          render: (reason) => (
+                            <Text type="secondary">{reason || '-'}</Text>
+                          ),
+                        },
+                      ]}
+                    />
+                  )}
+                </Card>
+              </>
+            ),
+          },
+          {
+            key: 'all',
+            label: (
+              <Space>
+                <SwapOutlined />
+                All Substitutions
+              </Space>
+            ),
+            children: (
+              <>
+                {/* Statistics */}
+                <Row gutter={16} style={{ marginBottom: 24 }}>
+                  <Col xs={8}>
+                    <Card>
+                      <Statistic
+                        title="Total Substitutions"
+                        value={substitutions.length}
+                        prefix={<SwapOutlined />}
+                      />
+                    </Card>
+                  </Col>
+                  <Col xs={8}>
+                    <Card>
+                      <Statistic
+                        title="Active"
+                        value={activeCount}
+                        valueStyle={{ color: '#52c41a' }}
+                      />
+                    </Card>
+                  </Col>
+                  <Col xs={8}>
+                    <Card>
+                      <Statistic
+                        title="Pending"
+                        value={pendingCount}
+                        valueStyle={{ color: '#faad14' }}
+                      />
+                    </Card>
+                  </Col>
+                </Row>
+
+                {/* Table */}
+                <Card>
+                  <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
+                    <Input
+                      placeholder="Search by teacher or section..."
+                      prefix={<SearchOutlined />}
+                      style={{ width: 300 }}
+                      value={searchText}
+                      onChange={(e) => setSearchText(e.target.value)}
+                      allowClear
+                    />
+                    <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
+                      Refresh
+                    </Button>
+                  </div>
+
+                  <Table
+                    columns={columns}
+                    dataSource={filteredSubstitutions}
+                    rowKey="id"
+                    loading={isLoading}
+                    pagination={{
+                      pageSize: 10,
+                      showSizeChanger: true,
+                      showTotal: (total) => `Total ${total} substitutions`,
+                    }}
+                    locale={{
+                      emptyText: (
+                        <Empty
+                          image={Empty.PRESENTED_IMAGE_SIMPLE}
+                          description="No substitutions found"
+                        >
+                          <Button type="primary" icon={<PlusOutlined />} onClick={() => openDrawer()}>
+                            Add Substitution
+                          </Button>
+                        </Empty>
+                      ),
+                    }}
+                  />
+                </Card>
+              </>
+            ),
+          },
+        ]}
+      />
 
       {/* Create/Edit Drawer */}
       <Drawer

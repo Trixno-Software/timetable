@@ -168,6 +168,16 @@ class TimetableEntry(models.Model):
         db_table = "timetable_entries"
         ordering = ["day_of_week", "period_slot__period_number"]
         unique_together = [["timetable", "section", "day_of_week", "period_slot"]]
+        indexes = [
+            # Index for teacher conflict detection
+            models.Index(fields=["timetable", "teacher", "day_of_week", "period_slot"]),
+            # Index for section conflict detection
+            models.Index(fields=["timetable", "section", "day_of_week", "period_slot"]),
+            # Index for room conflict detection
+            models.Index(fields=["timetable", "room", "day_of_week", "period_slot"]),
+            # Index for listing entries by timetable
+            models.Index(fields=["timetable", "day_of_week"]),
+        ]
 
     def __str__(self):
         return f"{self.section} - {self.get_day_of_week_display()} P{self.period_slot.period_number}"

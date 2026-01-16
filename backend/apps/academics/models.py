@@ -98,6 +98,13 @@ class Subject(models.Model):
         return f"{self.name} ({self.code})"
 
 
+class TeacherStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    ON_LEAVE = "on_leave", "On Leave"
+    RESIGNED = "resigned", "Resigned"
+    TERMINATED = "terminated", "Terminated"
+
+
 class Teacher(models.Model):
     """Teacher entity linked to user account"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -133,6 +140,20 @@ class Teacher(models.Model):
         blank=True,
         related_name="class_teacher"
     )
+    status = models.CharField(
+        max_length=20,
+        choices=TeacherStatus.choices,
+        default=TeacherStatus.ACTIVE
+    )
+    departure_date = models.DateField(null=True, blank=True)
+    departure_reason = models.TextField(blank=True)
+    replaced_by = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="replaces"
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -148,6 +169,17 @@ class Teacher(models.Model):
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}"
+
+    @property
+    def has_left(self):
+        return self.status in [TeacherStatus.RESIGNED, TeacherStatus.TERMINATED]
+
+    @property
+    def needs_replacement(self):
+        """Check if teacher has left and has active assignments without replacement"""
+        if not self.has_left:
+            return False
+        return self.assignments.filter(is_active=True).exists() and not self.replaced_by
 
 
 class TeacherAvailability(models.Model):
@@ -263,7 +295,9 @@ class Assignment(models.Model):
     teacher = models.ForeignKey(
         Teacher,
         on_delete=models.CASCADE,
-        related_name="assignments"
+        related_name="assignments",
+        null=True,
+        blank=True
     )
     session = models.ForeignKey(
         Session,
@@ -282,7 +316,8 @@ class Assignment(models.Model):
         unique_together = [["section", "subject", "session"]]
 
     def __str__(self):
-        return f"{self.section} - {self.subject} ({self.teacher.full_name})"
+        teacher_name = self.teacher.full_name if self.teacher else "Unassigned"
+        return f"{self.section} - {self.subject} ({teacher_name})"
 
     @property
     def branch(self):

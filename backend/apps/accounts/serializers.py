@@ -121,3 +121,93 @@ class UserActivitySerializer(serializers.ModelSerializer):
         model = UserActivity
         fields = ["id", "user", "user_email", "action", "details", "ip_address", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+
+class SchoolRegistrationSerializer(serializers.Serializer):
+    """Serializer for school self-registration"""
+    # School details
+    school_name = serializers.CharField(max_length=255)
+    school_code = serializers.CharField(max_length=50)
+    school_email = serializers.EmailField(required=False, allow_blank=True)
+    school_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    school_address = serializers.CharField(required=False, allow_blank=True)
+    school_city = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    school_state = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    school_pincode = serializers.CharField(max_length=20, required=False, allow_blank=True)
+
+    # Admin user details
+    admin_email = serializers.EmailField()
+    admin_password = serializers.CharField(write_only=True, min_length=8)
+    admin_confirm_password = serializers.CharField(write_only=True, min_length=8)
+    admin_first_name = serializers.CharField(max_length=100)
+    admin_last_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    admin_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+
+    def validate_school_code(self, value):
+        from apps.org.models import School
+        if School.objects.filter(code__iexact=value).exists():
+            raise serializers.ValidationError("A school with this code already exists")
+        return value.upper()
+
+    def validate_admin_email(self, value):
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("A user with this email already exists")
+        return value.lower()
+
+    def validate(self, data):
+        if data["admin_password"] != data["admin_confirm_password"]:
+            raise serializers.ValidationError(
+                {"admin_confirm_password": "Passwords do not match"}
+            )
+        return data
+
+    def create(self, validated_data):
+        from django.db import transaction
+        from apps.org.models import School, Branch
+
+        with transaction.atomic():
+            # Create school
+            school = School.objects.create(
+                name=validated_data["school_name"],
+                code=validated_data["school_code"],
+                email=validated_data.get("school_email", ""),
+                phone=validated_data.get("school_phone", ""),
+                address=validated_data.get("school_address", ""),
+                city=validated_data.get("school_city", ""),
+                state=validated_data.get("school_state", ""),
+                pincode=validated_data.get("school_pincode", ""),
+                plan="basic",
+                max_branches=1,
+                max_users=50,
+            )
+
+            # Create default branch
+            branch = Branch.objects.create(
+                school=school,
+                name="Main Branch",
+                code="MAIN",
+                email=validated_data.get("school_email", ""),
+                phone=validated_data.get("school_phone", ""),
+                address=validated_data.get("school_address", ""),
+                city=validated_data.get("school_city", ""),
+                state=validated_data.get("school_state", ""),
+                pincode=validated_data.get("school_pincode", ""),
+            )
+
+            # Create admin user
+            admin_user = User.objects.create_user(
+                email=validated_data["admin_email"],
+                password=validated_data["admin_password"],
+                first_name=validated_data["admin_first_name"],
+                last_name=validated_data.get("admin_last_name", ""),
+                phone=validated_data.get("admin_phone", ""),
+                role=UserRole.SCHOOL_ADMIN,
+                school=school,
+                branch=branch,
+            )
+
+            return {
+                "school": school,
+                "branch": branch,
+                "user": admin_user,
+            }
