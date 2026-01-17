@@ -85,10 +85,10 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("DB_NAME", "timetable"),
-        "USER": os.getenv("DB_USER", "postgres"),
-        "PASSWORD": os.getenv("DB_PASSWORD", "Doctodo#2021lab"),
-        "HOST": os.getenv("DB_HOST", "doctodolab.ctvyvn5rv2jl.ap-south-1.rds.amazonaws.com"),
+        "NAME": os.getenv("DB_NAME",),
+        "USER": os.getenv("DB_USER",),
+        "PASSWORD": os.getenv("DB_PASSWORD"),
+        "HOST": os.getenv("DB_HOST"),
         "PORT": os.getenv("DB_PORT", "5432"),
     }
 }
