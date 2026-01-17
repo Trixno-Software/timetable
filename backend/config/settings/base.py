@@ -152,7 +152,7 @@ SIMPLE_JWT = {
 
 # CORS Settings
 CORS_ALLOWED_ORIGINS = os.getenv(
-    "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000","https://main.d1njickde9fx8z.amplifyapp.com/"
 ).split(",")
 CORS_ALLOW_CREDENTIALS = True
 
